@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AAG Contact Form — Dev Harness</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 40px 20px;
+        background: #f4f5f8;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: #10131f;
+      }
+      .harness {
+        max-width: 1000px;
+        margin: 0 auto 48px;
+      }
+      .harness h1 {
+        font-size: 15px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #5b6172;
+      }
+      .panel {
+        background: #fff;
+        padding: 32px;
+        border-radius: 16px;
+        box-shadow: 0 10px 30px rgba(16, 19, 31, 0.06);
+      }
+      /* Simulate the two embed placements from the mocks. */
+      .full {
+        max-width: 1000px;
+      }
+      .half {
+        max-width: 460px;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      Dev harness only. Mocks the backend so `npm run dev` demonstrates the
+      widget without a live endpoint. The real Webflow embed is just the
+      #aag-contact-form div plus the built script tag (see README).
+    -->
+    <div class="harness">
+      <h1>Full-page placement (~1000px)</h1>
+      <div class="panel full">
+        <div
+          id="aag-contact-form"
+          data-endpoint="/__mock__/contact"
+          data-source="dev-harness/full-page"
+        ></div>
+      </div>
+    </div>
+
+    <script>
+      // Intercept the mock endpoint so submissions resolve locally.
+      const realFetch = window.fetch.bind(window);
+      window.fetch = async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url && url.includes("/__mock__/contact")) {
+          const body = init && init.body;
+          if (body instanceof FormData) {
+            console.log("[mock] received submission:");
+            for (const [key, value] of body.entries()) {
+              console.log(`  ${key} =`, value);
+            }
+          }
+          await new Promise((r) => setTimeout(r, 700));
+          return new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return realFetch(input, init);
+      };
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
