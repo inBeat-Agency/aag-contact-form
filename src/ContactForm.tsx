@@ -129,13 +129,6 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
 
   return (
     <div className="aag-form-root">
-      <div className="aag-form-header">
-        <h2 className="aag-form-title">Contact Us</h2>
-        <p className="aag-form-subtitle">
-          Select the nature of your inquiry to get started.
-        </p>
-      </div>
-
       <form
         className="aag-form-form"
         onSubmit={handleFormSubmit}

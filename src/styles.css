@@ -22,24 +22,6 @@
   box-sizing: border-box;
 }
 
-.aag-form-header {
-  margin-bottom: 24px;
-}
-
-.aag-form-title {
-  margin: 0 0 6px;
-  font-size: 26px;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.aag-form-subtitle {
-  margin: 0;
-  font-size: 15px;
-  color: var(--aag-form-muted, #5b6172);
-  line-height: 1.4;
-}
-
 .aag-form-form {
   display: flex;
   flex-direction: column;
@@ -217,19 +199,18 @@
 }
 
 /*
- * Collapse two-column rows to one column when the widget container is narrow.
- * Container query is the primary mechanism (half-page ~460px embeds collapse
- * independently of the viewport). A viewport media query is the fallback for
- * browsers without container-query support.
+ * Collapse two-column rows only when the widget container is genuinely narrow.
+ * Half-page desktop embeds are approximately 480px wide and intentionally keep
+ * their paired fields side-by-side; mobile-width containers collapse.
  */
-@container (max-width: 560px) {
+@container (max-width: 420px) {
   .aag-form-row {
     grid-template-columns: 1fr;
   }
 }
 
 @supports not (container-type: inline-size) {
-  @media (max-width: 560px) {
+  @media (max-width: 420px) {
     .aag-form-row {
       grid-template-columns: 1fr;
     }

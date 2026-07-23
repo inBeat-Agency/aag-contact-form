@@ -33,13 +33,14 @@ async function selectInquiry(label: string) {
 }
 
 describe("ContactForm — initial render (progressive disclosure)", () => {
-  it("shows the header and inquiry select, but no personal fields yet", () => {
+  it("shows the inquiry select without a widget-owned header or personal fields", () => {
     renderForm();
 
-    expect(
-      screen.getByRole("heading", { name: "Contact Us" }),
-    ).toBeInTheDocument();
     expect(screen.getByLabelText("Inquiry type")).toBeInTheDocument();
+    expect(screen.queryByText("Contact Us")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Select the nature of your inquiry to get started."),
+    ).not.toBeInTheDocument();
 
     // Nothing past the inquiry select is disclosed until a type is chosen.
     expect(screen.queryByLabelText("First Name")).not.toBeInTheDocument();
@@ -92,6 +93,30 @@ describe("ContactForm — conditional field disclosure", () => {
     // No resume field for Consulting.
     expect(screen.queryByLabelText("Upload Resume")).not.toBeInTheDocument();
   });
+
+  it.each(["Consulting", "Recruitment / Hiring"])(
+    "groups every %s field pair in a two-column row contract",
+    async (inquiryType) => {
+      renderForm();
+      await selectInquiry(inquiryType);
+
+      const pairs = [
+        ["First Name", "Last Name"],
+        ["Title", "Company"],
+        [/^Phone/, /Company Size/],
+        [/Estimated Budget/, /Expected Timeline/],
+      ] as const;
+
+      for (const [firstLabel, secondLabel] of pairs) {
+        const first = screen.getByLabelText(firstLabel);
+        const second = screen.getByLabelText(secondLabel);
+        const row = first.closest(".aag-form-row");
+
+        expect(row).not.toBeNull();
+        expect(second.closest(".aag-form-row")).toBe(row);
+      }
+    },
+  );
 
   it("Submit Resume reveals the file input but not budget/timeline", async () => {
     renderForm();
