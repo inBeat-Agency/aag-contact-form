@@ -186,13 +186,12 @@ describe("submitContactForm", () => {
     const promise = submitContactForm(
       "https://example.test/submit",
       new FormData(),
-      50,
     );
 
     expect(capturedSignal?.aborted).toBe(false);
 
     // Advance past the timeout; the AbortController should fire.
-    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS);
 
     expect(capturedSignal?.aborted).toBe(true);
     // The aborted fetch is caught and surfaced as "error", never thrown.
