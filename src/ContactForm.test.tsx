@@ -149,6 +149,27 @@ describe("ContactForm — field persistence on inquiry change", () => {
 });
 
 describe("ContactForm — validation", () => {
+  it("marks visible required controls with native required semantics", async () => {
+    renderForm();
+    await selectInquiry("Submit Resume");
+
+    for (const label of [
+      "Inquiry type",
+      "First Name",
+      "Last Name",
+      "Work Email",
+      "Title",
+      "Company",
+      "Upload Resume",
+      "How can we help you?",
+    ]) {
+      expect(screen.getByLabelText(label)).toBeRequired();
+    }
+
+    expect(screen.getByLabelText(/^Phone/)).not.toBeRequired();
+    expect(screen.getByLabelText(/Company Size/)).not.toBeRequired();
+  });
+
   it("shows inline errors and does not hit the network when required fields are empty", async () => {
     renderForm();
     const user = await selectInquiry("General Question");
@@ -183,6 +204,42 @@ describe("ContactForm — validation", () => {
     const errorNode = document.getElementById(describedBy as string);
     expect(errorNode).not.toBeNull();
     expect(errorNode).toHaveTextContent("First name is required");
+  });
+});
+
+describe("ContactForm — Submit Resume submission", () => {
+  it("uploads a valid file through the real input and sends it in FormData", async () => {
+    renderForm();
+    const user = await selectInquiry("Submit Resume");
+    const resume = new File(["resume contents"], "jane-smith.pdf", {
+      type: "application/pdf",
+    });
+
+    await user.type(screen.getByLabelText("First Name"), "Jane");
+    await user.type(screen.getByLabelText("Last Name"), "Smith");
+    await user.type(
+      screen.getByLabelText("Work Email"),
+      "jane@company.com",
+    );
+    await user.type(screen.getByLabelText("Title"), "Engineer");
+    await user.type(screen.getByLabelText("Company"), "Acme Inc.");
+    await user.upload(screen.getByLabelText("Upload Resume"), resume);
+    await user.type(
+      screen.getByLabelText("How can we help you?"),
+      "Please consider my application.",
+    );
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBeInstanceOf(FormData);
+
+    const body = init.body as FormData;
+    expect(body.get("inquiryType")).toBe("Submit Resume");
+    expect(body.get("firstName")).toBe("Jane");
+    expect(body.get("resume")).toBeInstanceOf(File);
+    expect((body.get("resume") as File).name).toBe("jane-smith.pdf");
   });
 });
 

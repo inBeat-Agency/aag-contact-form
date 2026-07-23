@@ -1,7 +1,7 @@
 import type { ContactFormFields } from "./schema";
 
-/** Wall-clock timeout for the submission request. */
-export const SUBMIT_TIMEOUT_MS = 15_000;
+/** Upload-safe wall-clock default for the submission request. */
+export const SUBMIT_TIMEOUT_MS = 60_000;
 
 export type SubmitOutcome = "success" | "error";
 
@@ -35,7 +35,7 @@ export function buildFormData(
   appendIfPresent("estimatedBudget", values.estimatedBudget);
   appendIfPresent("expectedTimeline", values.expectedTimeline);
 
-  const resume = values.resume?.[0];
+  const resume = values.resume instanceof File ? values.resume : values.resume?.[0];
   if (resume) data.append("resume", resume, resume.name);
 
   if (source) data.append("source", source);
@@ -51,9 +51,10 @@ export function buildFormData(
 export async function submitContactForm(
   endpoint: string,
   formData: FormData,
+  timeoutMs = SUBMIT_TIMEOUT_MS,
 ): Promise<SubmitOutcome> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SUBMIT_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(endpoint, {

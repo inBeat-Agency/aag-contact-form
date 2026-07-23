@@ -63,6 +63,7 @@ export const TextField = forwardRef<HTMLInputElement, TextFieldProps>(
           id={id}
           ref={ref}
           className="aag-form-input"
+          required={!optional}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId(id) : undefined}
         />
@@ -93,6 +94,7 @@ export const SelectField = forwardRef<HTMLSelectElement, SelectFieldProps>(
           ref={ref}
           className="aag-form-select"
           defaultValue=""
+          required={!optional}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId(id) : undefined}
         >
@@ -126,6 +128,7 @@ export const TextareaField = forwardRef<HTMLTextAreaElement, TextareaFieldProps>
           id={id}
           ref={ref}
           className="aag-form-textarea"
+          required={!optional}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId(id) : undefined}
         />
@@ -151,6 +154,7 @@ export const FileField = forwardRef<HTMLInputElement, FileFieldProps>(
           ref={ref}
           type="file"
           className="aag-form-file"
+          required={!optional}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId(id) : undefined}
         />

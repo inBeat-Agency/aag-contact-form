@@ -132,6 +132,10 @@ describe("submitContactForm", () => {
     vi.useRealTimers();
   });
 
+  it("uses a 60s upload-safe timeout by default", () => {
+    expect(SUBMIT_TIMEOUT_MS).toBe(60_000);
+  });
+
   it("POSTs the FormData (not JSON) to the endpoint with a signal", async () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
     const body = buildFormData(makeFields(), "src");
@@ -164,7 +168,7 @@ describe("submitContactForm", () => {
     expect(outcome).toBe("error");
   });
 
-  it("aborts the request when the 15s timeout elapses", async () => {
+  it("aborts the request when the configured timeout elapses", async () => {
     vi.useFakeTimers();
 
     // Resolve only when the abort signal fires, mirroring fetch's real behavior
@@ -182,12 +186,13 @@ describe("submitContactForm", () => {
     const promise = submitContactForm(
       "https://example.test/submit",
       new FormData(),
+      50,
     );
 
     expect(capturedSignal?.aborted).toBe(false);
 
     // Advance past the timeout; the AbortController should fire.
-    await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(50);
 
     expect(capturedSignal?.aborted).toBe(true);
     // The aborted fetch is caught and surfaced as "error", never thrown.

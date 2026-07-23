@@ -85,7 +85,8 @@ After deploy, reference `https://<project>.pages.dev/aag-contact-form.js` (with 
 
 The form sends `multipart/form-data` (a `FormData` body) via `POST` to
 `data-endpoint`. A 2xx response is treated as success; anything else shows the
-error banner. Requests time out after 15s.
+error banner. Requests time out after 60s by default to accommodate the
+permitted 10MB resume upload.
 
 Flat, camelCase keys. Optional fields are omitted when empty.
 
@@ -117,7 +118,7 @@ src/
   schema.ts        # zod discriminated union + exported payload types (the contract)
   schema.test.ts   # vitest unit tests for the schema
   fields.tsx       # accessible field primitives (label/error/aria wiring)
-  submit.ts        # FormData builder + fetch with 15s timeout
+  submit.ts        # FormData builder + fetch with configurable 60s default timeout
   ContactForm.tsx  # the form component (progressive disclosure, states, honeypot)
   main.tsx         # self-mounting entry point (reads data attributes)
   styles.css       # aag-form- prefixed styles, custom properties, container query

@@ -75,11 +75,19 @@ const optionalEnum = <T extends readonly [string, ...string[]]>(values: T) =>
     .transform((value) => (value === "" ? undefined : value));
 
 /**
- * Resume file validation. Runs on `File` in the browser. We check both the
- * extension and the MIME type (MIME can be empty on some OSes, so extension is
- * the reliable signal) and enforce the size limit.
+ * Resume file validation. File inputs yield a FileList, so normalize its first
+ * item before validating the File itself. We check both the extension and the
+ * MIME type (MIME can be empty on some OSes, so extension is the reliable
+ * signal) and enforce the size limit.
  */
-export const resumeFileSchema = z
+function normalizeResumeFile(value: unknown) {
+  if (typeof FileList !== "undefined" && value instanceof FileList) {
+    return value.item(0) ?? undefined;
+  }
+  return value;
+}
+
+const resumeFile = z
   .custom<File>((value) => typeof File !== "undefined" && value instanceof File, {
     message: "Please upload your resume",
   })
@@ -91,6 +99,8 @@ export const resumeFileSchema = z
     const mimeOk = file.type === "" || ALLOWED_RESUME_MIME.has(file.type);
     return extOk && mimeOk;
   }, "Resume must be a PDF or Word document");
+
+export const resumeFileSchema = z.preprocess(normalizeResumeFile, resumeFile);
 
 // ---------------------------------------------------------------------------
 // Shared shapes.
@@ -178,6 +188,6 @@ export type ContactFormFields = {
   estimatedBudget: string;
   expectedTimeline: string;
   message: string;
-  resume: FileList | null;
+  resume: File | FileList | null;
   website: string; // honeypot
 };
