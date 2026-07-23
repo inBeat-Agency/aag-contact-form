@@ -244,6 +244,23 @@ describe("ContactForm — Submit Resume submission", () => {
 });
 
 describe("ContactForm — honeypot", () => {
+  it("fakes success before validation when the honeypot is filled", async () => {
+    const { container } = renderForm();
+    const user = await selectInquiry("General Question");
+
+    const honeypot = container.querySelector<HTMLInputElement>(
+      'input[name="website"]',
+    );
+    expect(honeypot).not.toBeNull();
+    await user.type(honeypot as HTMLInputElement, "spam-bot-value");
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Thanks!");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("fakes success without calling fetch when the honeypot is filled", async () => {
     const { container } = renderForm();
     const user = await selectInquiry("General Question");

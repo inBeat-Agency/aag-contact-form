@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -61,7 +61,6 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
     handleSubmit,
     watch,
     resetField,
-    getValues,
     formState: { errors },
   } = useForm<ContactFormFields>({
     defaultValues: DEFAULT_VALUES,
@@ -91,21 +90,26 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
   }
 
   async function onSubmit(values: ContactFormFields) {
-    // Honeypot: a real user never fills this. If it's set, pretend success and
-    // never touch the network. The honeypot lives outside the zod schema, so
-    // the resolver strips it from `values`; read it from the raw form state.
-    const honeypot = getValues("website");
-    if ((honeypot ?? "").trim() !== "") {
-      setStatus("success");
-      return;
-    }
-
     setStatus("submitting");
     const outcome = await submitContactForm(
       endpoint,
       buildFormData(values, source),
     );
     setStatus(outcome);
+  }
+
+  function handleFormSubmit(event: FormEvent<HTMLFormElement>) {
+    // Check the raw field before RHF invokes the Zod resolver. Bots that fill
+    // the honeypot should receive fake success even when visible fields fail
+    // validation.
+    const honeypot = new FormData(event.currentTarget).get("website");
+    if (typeof honeypot === "string" && honeypot.trim() !== "") {
+      event.preventDefault();
+      setStatus("success");
+      return;
+    }
+
+    void handleSubmit(onSubmit)(event);
   }
 
   if (status === "success") {
@@ -134,7 +138,7 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
 
       <form
         className="aag-form-form"
-        onSubmit={handleSubmit(onSubmit)}
+        onSubmit={handleFormSubmit}
         noValidate
       >
         {/* Honeypot field: visually hidden, ignored by assistive tech. */}
