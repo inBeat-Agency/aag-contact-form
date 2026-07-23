@@ -6,6 +6,11 @@ import cssInjectedByJsPlugin from "vite-plugin-css-injected-by-js";
 // runtime by JS, so Webflow only needs one <script> tag and one mount div.
 export default defineConfig({
   plugins: [react(), cssInjectedByJsPlugin()],
+  // Library mode leaves process.env.* references for consuming applications.
+  // This standalone browser IIFE has no consumer build step or Node globals.
+  define: {
+    "process.env.NODE_ENV": JSON.stringify("production"),
+  },
   build: {
     lib: {
       entry: "src/main.tsx",
