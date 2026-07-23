@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ContactForm } from "./ContactForm";
 
@@ -183,5 +183,43 @@ describe("ContactForm — validation", () => {
     const errorNode = document.getElementById(describedBy as string);
     expect(errorNode).not.toBeNull();
     expect(errorNode).toHaveTextContent("First name is required");
+  });
+});
+
+describe("ContactForm — honeypot", () => {
+  it("fakes success without calling fetch when the honeypot is filled", async () => {
+    const { container } = renderForm();
+    const user = await selectInquiry("General Question");
+
+    // Fill the real required fields so validation would otherwise pass and a
+    // real submission would fire — proving the honeypot is what short-circuits.
+    await user.type(screen.getByLabelText("First Name"), "Jane");
+    await user.type(screen.getByLabelText("Last Name"), "Smith");
+    await user.type(
+      screen.getByLabelText("Work Email"),
+      "jane@company.com",
+    );
+    await user.type(
+      screen.getByLabelText("How can we help you?"),
+      "Please reach out.",
+    );
+
+    // The honeypot is aria-hidden and has no accessible label, so query it
+    // directly by name — a bot would fill it, a human never sees it.
+    const honeypot = container.querySelector<HTMLInputElement>(
+      'input[name="website"]',
+    );
+    expect(honeypot).not.toBeNull();
+    await user.type(honeypot as HTMLInputElement, "spam-bot-value");
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    // Success screen renders and the network was never touched.
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent("Thanks!");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(
+      within(status).getByText(/within one business day/i),
+    ).toBeInTheDocument();
   });
 });

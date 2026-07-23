@@ -61,6 +61,7 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
     handleSubmit,
     watch,
     resetField,
+    getValues,
     formState: { errors },
   } = useForm<ContactFormFields>({
     defaultValues: DEFAULT_VALUES,
@@ -91,8 +92,10 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
 
   async function onSubmit(values: ContactFormFields) {
     // Honeypot: a real user never fills this. If it's set, pretend success and
-    // never touch the network.
-    if (values.website.trim() !== "") {
+    // never touch the network. The honeypot lives outside the zod schema, so
+    // the resolver strips it from `values`; read it from the raw form state.
+    const honeypot = getValues("website");
+    if ((honeypot ?? "").trim() !== "") {
       setStatus("success");
       return;
     }
