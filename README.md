@@ -33,8 +33,8 @@ All CSS is injected by JS at runtime — there is no separate stylesheet to load
 
 ## Webflow embed
 
-Drop the mount div wherever the form should appear, then load the script (host
-the built file on a CDN / Cloudflare Pages and reference the versioned URL):
+Drop the mount div wherever the form should appear, then load the versioned
+Cloudflare Pages script URL:
 
 ```html
 <div
@@ -43,8 +43,8 @@ the built file on a CDN / Cloudflare Pages and reference the versioned URL):
   data-source="webflow/contact-page"
 ></div>
 
-<!-- Bump the ?v= query when you deploy a new build to bust caches. -->
-<script src="https://your-cdn.example.com/aag-contact-form.js?v=2026-07-21" defer></script>
+<!-- Use an explicit release or commit SHA. Never use a "latest" URL. -->
+<script src="https://aag-contact-form.pages.dev/aag-contact-form.js?v=<release-or-sha>" defer></script>
 ```
 
 - `data-endpoint` **(required)** — URL the form POSTs to. If missing, the widget
@@ -70,16 +70,37 @@ tokens) by setting CSS custom properties on the mount div:
 
 All classes are prefixed `aag-form-` to avoid colliding with Webflow styles.
 
-## Cloudflare Pages deploy
+## Cloudflare Pages delivery
 
-| Setting | Value |
+GitHub Actions is the delivery mechanism. On every push to `main` (or a manual
+workflow dispatch), Actions installs dependencies, builds the widget, and uses
+Cloudflare Pages Direct Upload to deploy `dist`. The deployment step runs only
+after `npm run build` succeeds.
+
+Before the first workflow deployment, an owner must create the Pages project
+with a Pages-scoped API token:
+
+```bash
+npx wrangler pages project create aag-contact-form --production-branch=main
+```
+
+Add these GitHub repository secrets by their exact names:
+
+| Secret | Purpose |
 | --- | --- |
-| Build command | `npm run build` |
-| Build output directory | `dist` |
-| Node version | 18+ |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token with permission to deploy the Pages project |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID that owns the Pages project |
 
-After deploy, reference `https://<project>.pages.dev/aag-contact-form.js` (with a
-`?v=` cache-buster) in the Webflow embed.
+The deployment configuration is in [`wrangler.toml`](./wrangler.toml) and
+[`.github/workflows/deploy.yml`](./.github/workflows/deploy.yml). Do not commit
+tokens, account IDs, or other Cloudflare credentials.
+
+After Pages has deployed, use this fixed, explicitly versioned Webflow URL
+pattern and bump the release or commit SHA for every new deployment:
+
+```text
+https://aag-contact-form.pages.dev/aag-contact-form.js?v=<release-or-sha>
+```
 
 ## API contract
 
