@@ -114,11 +114,15 @@ const commonShape = {
   message: requiredString("Message"),
 };
 
-// Fields shared by every "business" inquiry (everything except General Question).
-const businessContactShape = {
+/**
+ * Company details, collected only by the engagement flows (Consulting and
+ * Recruitment / Hiring). Submit Resume deliberately omits these: a candidate
+ * applies as an individual, so asking for their title, employer, and employer
+ * headcount is noise we never act on.
+ */
+const companyDetailsShape = {
   title: requiredString("Title"),
   company: requiredString("Company"),
-  phone: optionalPhone,
   companySize: optionalEnum(COMPANY_SIZES),
 };
 
@@ -134,7 +138,8 @@ const generalQuestionSchema = z.object({
 // Consulting and Recruitment / Hiring share an identical field set.
 const engagementShape = {
   ...commonShape,
-  ...businessContactShape,
+  ...companyDetailsShape,
+  phone: optionalPhone,
   estimatedBudget: optionalEnum(BUDGETS),
   expectedTimeline: optionalEnum(TIMELINES),
 };
@@ -149,10 +154,11 @@ const recruitmentSchema = z.object({
   ...engagementShape,
 });
 
+// Candidates give us contact details and a file — no company details.
 const submitResumeSchema = z.object({
   inquiryType: z.literal("Submit Resume"),
   ...commonShape,
-  ...businessContactShape,
+  phone: optionalPhone,
   resume: resumeFileSchema,
 });
 

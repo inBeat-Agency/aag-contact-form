@@ -43,13 +43,15 @@ const DEFAULT_VALUES: ContactFormFields = {
   website: "",
 };
 
-// Which extra field groups each inquiry type reveals.
-const SHOWS_BUSINESS_FIELDS = new Set([
+// Which extra field groups each inquiry type reveals. Title, Company, Company
+// Size, Budget and Timeline are engagement-only; Submit Resume collects a phone
+// number but no company details.
+const SHOWS_ENGAGEMENT_FIELDS = new Set(["Consulting", "Recruitment / Hiring"]);
+const SHOWS_PHONE_FIELD = new Set([
   "Consulting",
   "Recruitment / Hiring",
   "Submit Resume",
 ]);
-const SHOWS_ENGAGEMENT_FIELDS = new Set(["Consulting", "Recruitment / Hiring"]);
 
 const RESUME_ACCEPT = ALLOWED_RESUME_EXTENSIONS.join(",");
 
@@ -72,8 +74,8 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
   });
 
   const inquiryType = watch("inquiryType");
-  const showBusiness = SHOWS_BUSINESS_FIELDS.has(inquiryType);
   const showEngagement = SHOWS_ENGAGEMENT_FIELDS.has(inquiryType);
+  const showPhone = SHOWS_PHONE_FIELD.has(inquiryType);
   const showResume = inquiryType === "Submit Resume";
 
   // When the inquiry type changes, common fields persist but the type-specific
@@ -126,6 +128,24 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
   }
 
   const inquiryReg = register("inquiryType");
+
+  // `.aag-form-row` is a hard two-column grid, so a lone Phone inside one would
+  // render at half width with a dead gap beside it on desktop and in the
+  // half-page embed. Phone keeps its Company Size partner in the engagement
+  // rows; in the Submit Resume flow the same element is rendered outside the
+  // row so it spans full width, like Work Email and the message textarea.
+  const phoneField = showPhone ? (
+    <TextField
+      id="aag-form-phone"
+      label="Phone"
+      type="tel"
+      optional
+      placeholder="+1 555 000 0000"
+      autoComplete="tel"
+      error={errors.phone?.message}
+      {...register("phone")}
+    />
+  ) : null;
 
   return (
     <div className="aag-form-root">
@@ -198,7 +218,7 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
           {...register("workEmail")}
         />
 
-        {showBusiness ? (
+        {showEngagement ? (
           <div className="aag-form-row">
             <TextField
               id="aag-form-title"
@@ -219,18 +239,9 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
           </div>
         ) : null}
 
-        {showBusiness ? (
+        {showEngagement ? (
           <div className="aag-form-row">
-            <TextField
-              id="aag-form-phone"
-              label="Phone"
-              type="tel"
-              optional
-              placeholder="+1 555 000 0000"
-              autoComplete="tel"
-              error={errors.phone?.message}
-              {...register("phone")}
-            />
+            {phoneField}
             <SelectField
               id="aag-form-companySize"
               label="Company Size"
@@ -241,7 +252,9 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
               {...register("companySize")}
             />
           </div>
-        ) : null}
+        ) : (
+          phoneField
+        )}
 
         {showEngagement ? (
           <div className="aag-form-row">

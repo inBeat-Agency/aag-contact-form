@@ -202,19 +202,44 @@ describe("ContactForm — conditional field disclosure", () => {
     },
   );
 
-  it("Submit Resume reveals the file input but not budget/timeline", async () => {
+  it("Submit Resume reveals the file input but no company details", async () => {
     renderForm();
     await selectInquiry("Submit Resume");
 
     expect(screen.getByLabelText("Upload Resume")).toBeInTheDocument();
-    // Submit Resume shows business fields (Title/Company) but not engagement.
-    expect(screen.getByLabelText("Title")).toBeInTheDocument();
-    expect(screen.getByLabelText("Company")).toBeInTheDocument();
+    // A candidate applies as an individual: contact details + phone, no company.
+    expect(screen.getByLabelText(/^Phone/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Company")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Company Size/)).not.toBeInTheDocument();
 
     expect(screen.queryByLabelText(/Estimated Budget/)).not.toBeInTheDocument();
     expect(
       screen.queryByLabelText(/Expected Timeline/),
     ).not.toBeInTheDocument();
+  });
+
+  it.each(["Consulting", "Recruitment / Hiring"])(
+    "%s still collects Title, Company and Company Size",
+    async (inquiryType) => {
+      renderForm();
+      await selectInquiry(inquiryType);
+
+      expect(screen.getByLabelText("Title")).toBeInTheDocument();
+      expect(screen.getByLabelText("Company")).toBeInTheDocument();
+      expect(screen.getByLabelText(/Company Size/)).toBeInTheDocument();
+    },
+  );
+
+  it("renders the lone Submit Resume phone full-width, outside the two-column row", async () => {
+    renderForm();
+    await selectInquiry("Submit Resume");
+
+    // `.aag-form-row` is a hard 1fr 1fr grid; a solo child would render at half
+    // width with a dead gap beside it.
+    expect(
+      screen.getByLabelText(/^Phone/).closest(".aag-form-row"),
+    ).toBeNull();
   });
 });
 
@@ -267,8 +292,6 @@ describe("ContactForm — validation", () => {
       "First Name",
       "Last Name",
       "Work Email",
-      "Title",
-      "Company",
       "Upload Resume",
       "How can we help you?",
     ]) {
@@ -276,7 +299,6 @@ describe("ContactForm — validation", () => {
     }
 
     expect(screen.getByLabelText(/^Phone/)).not.toBeRequired();
-    expect(screen.getByLabelText(/Company Size/)).not.toBeRequired();
   });
 
   it("shows inline errors and does not hit the network when required fields are empty", async () => {
@@ -330,8 +352,6 @@ describe("ContactForm — Submit Resume submission", () => {
       screen.getByLabelText("Work Email"),
       "jane@company.com",
     );
-    await user.type(screen.getByLabelText("Title"), "Engineer");
-    await user.type(screen.getByLabelText("Company"), "Acme Inc.");
     await user.upload(screen.getByLabelText("Upload Resume"), resume);
     await user.type(
       screen.getByLabelText("How can we help you?"),
@@ -349,6 +369,44 @@ describe("ContactForm — Submit Resume submission", () => {
     expect(body.get("firstName")).toBe("Jane");
     expect(body.get("resume")).toBeInstanceOf(File);
     expect((body.get("resume") as File).name).toBe("jane-smith.pdf");
+  });
+
+  it("never sends company details, even when they were typed under a previous inquiry type", async () => {
+    renderForm();
+    const user = await selectInquiry("Consulting");
+    const resume = new File(["resume contents"], "jane-smith.pdf", {
+      type: "application/pdf",
+    });
+
+    // Fill the engagement-only fields, then switch away from that flow.
+    await user.type(screen.getByLabelText("Title"), "Head of Talent");
+    await user.type(screen.getByLabelText("Company"), "Acme Inc.");
+    await user.selectOptions(screen.getByLabelText(/Company Size/), "51-200");
+
+    await user.selectOptions(
+      screen.getByLabelText("Inquiry type"),
+      "Submit Resume",
+    );
+
+    await user.type(screen.getByLabelText("First Name"), "Jane");
+    await user.type(screen.getByLabelText("Last Name"), "Smith");
+    await user.type(screen.getByLabelText("Work Email"), "jane@company.com");
+    await user.upload(screen.getByLabelText("Upload Resume"), resume);
+    await user.type(
+      screen.getByLabelText("How can we help you?"),
+      "Please consider my application.",
+    );
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = init.body as FormData;
+
+    expect(body.get("inquiryType")).toBe("Submit Resume");
+    expect(body.has("title")).toBe(false);
+    expect(body.has("company")).toBe(false);
+    expect(body.has("companySize")).toBe(false);
   });
 });
 
