@@ -112,11 +112,49 @@ describe("Consulting / Recruitment (engagement)", () => {
 });
 
 describe("Submit Resume", () => {
-  const resumeBase = {
-    ...baseContact,
-    title: "Senior Engineer",
-    company: "Acme Inc.",
-  };
+  // Candidates apply as individuals: no title/company/companySize collected.
+  const resumeBase = { ...baseContact };
+
+  it("accepts a submission without any company details", () => {
+    const result = contactFormSchema.safeParse({
+      inquiryType: "Submit Resume",
+      ...resumeBase,
+      resume: makeFile("cv.pdf", "application/pdf", 1024),
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("strips company details out of the parsed payload", () => {
+    const result = contactFormSchema.safeParse({
+      inquiryType: "Submit Resume",
+      ...resumeBase,
+      title: "Senior Engineer",
+      company: "Acme Inc.",
+      companySize: "51-200",
+      resume: makeFile("cv.pdf", "application/pdf", 1024),
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).not.toHaveProperty("title");
+      expect(result.data).not.toHaveProperty("company");
+      expect(result.data).not.toHaveProperty("companySize");
+    }
+  });
+
+  it("still accepts an optional phone number", () => {
+    const result = contactFormSchema.safeParse({
+      inquiryType: "Submit Resume",
+      ...resumeBase,
+      phone: "+1 555 000 0000",
+      resume: makeFile("cv.pdf", "application/pdf", 1024),
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success && result.data.inquiryType === "Submit Resume") {
+      expect(result.data.phone).toBe("+1 555 000 0000");
+    }
+  });
 
   it("accepts a valid PDF under the size limit", () => {
     const result = contactFormSchema.safeParse({
@@ -183,5 +221,19 @@ describe("discriminated union", () => {
   it("rejects a missing inquiry type", () => {
     const result = contactFormSchema.safeParse({ ...baseContact });
     expect(result.success).toBe(false);
+  });
+
+  it("reports a human-readable error on the inquiryType path for the placeholder value", () => {
+    const result = contactFormSchema.safeParse({
+      inquiryType: "",
+      ...baseContact,
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const issue = result.error.issues[0];
+      expect(issue?.path).toEqual(["inquiryType"]);
+      expect(issue?.message).toBe("Please select an inquiry type");
+    }
   });
 });

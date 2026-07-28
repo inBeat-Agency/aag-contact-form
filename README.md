@@ -4,9 +4,11 @@ A standalone, embeddable **Contact Us** form for the Alpha Apex Group Webflow
 site. It is a single React app compiled to one self-mounting IIFE bundle. CSS is
 injected at runtime, so embedding requires only one `<div>` and one `<script>`.
 
-The form uses progressive disclosure: only the **Inquiry type** select shows
-until a type is chosen, then the relevant fields appear in a single form (not a
-multi-step wizard).
+The form uses progressive disclosure in a single form (not a multi-step wizard).
+On the **Inquiry type** placeholder it previews the General Question field set
+so the widget never loads empty; choosing a type then reveals that type's
+fields. The preview is presentational only — the placeholder is not a valid
+value, so submitting without choosing a type fails and asks for one.
 
 ## Dev commands
 
@@ -118,10 +120,10 @@ Flat, camelCase keys. Optional fields are omitted when empty.
 | `lastName` | string | always | |
 | `workEmail` | string | always | Valid email |
 | `message` | string | always | Textarea contents |
-| `title` | string | business types | Present for Consulting, Recruitment / Hiring, Submit Resume |
-| `company` | string | business types | Same as above |
-| `phone` | string | optional | Loosely validated |
-| `companySize` | string | optional | `1-50`, `51-200`, `201-1,000`, `1,000+` |
+| `title` | string | engagement types | Consulting / Recruitment only. **Not sent for Submit Resume.** |
+| `company` | string | engagement types | Same as above |
+| `phone` | string | optional | Loosely validated. Consulting / Recruitment / Submit Resume |
+| `companySize` | string | optional | Consulting / Recruitment only: `1-50`, `51-200`, `201-1,000`, `1,000+`. **Not sent for Submit Resume.** |
 | `estimatedBudget` | string | optional | Consulting / Recruitment only: `$30k or less`, `$30k - $50k`, `$50k - $100k`, `Greater than $100k` |
 | `expectedTimeline` | string | optional | Consulting / Recruitment only: `ASAP`, `1-3 months`, `1-6 months`, `6+ months` |
 | `resume` | File | Submit Resume only | `.pdf/.doc/.docx`, ≤ 10MB |
