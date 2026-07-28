@@ -160,12 +160,26 @@ const submitResumeSchema = z.object({
 // Discriminated union + exported types.
 // ---------------------------------------------------------------------------
 
-export const contactFormSchema = z.discriminatedUnion("inquiryType", [
-  recruitmentSchema,
-  consultingSchema,
-  generalQuestionSchema,
-  submitResumeSchema,
-]);
+/**
+ * The form renders the placeholder (`inquiryType: ""`) until a real type is
+ * picked, so an unmatched discriminator is a state real users submit from.
+ * Zod's default message for that case leaks the raw option list ("Invalid
+ * discriminator value. Expected 'Recruitment / Hiring' | ..."), which is
+ * user-hostile. Zod already reports the issue on the `inquiryType` path, so
+ * overriding the message is enough to land friendly copy on the select.
+ */
+const inquiryTypeErrorMap: z.ZodErrorMap = (issue, ctx) => {
+  if (issue.code === z.ZodIssueCode.invalid_union_discriminator) {
+    return { message: "Please select an inquiry type" };
+  }
+  return { message: ctx.defaultError };
+};
+
+export const contactFormSchema = z.discriminatedUnion(
+  "inquiryType",
+  [recruitmentSchema, consultingSchema, generalQuestionSchema, submitResumeSchema],
+  { errorMap: inquiryTypeErrorMap },
+);
 
 /** Validated payload produced by the form (post-parse). */
 export type ContactFormValues = z.infer<typeof contactFormSchema>;

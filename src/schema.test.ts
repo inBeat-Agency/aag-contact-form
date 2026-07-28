@@ -184,4 +184,18 @@ describe("discriminated union", () => {
     const result = contactFormSchema.safeParse({ ...baseContact });
     expect(result.success).toBe(false);
   });
+
+  it("reports a human-readable error on the inquiryType path for the placeholder value", () => {
+    const result = contactFormSchema.safeParse({
+      inquiryType: "",
+      ...baseContact,
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const issue = result.error.issues[0];
+      expect(issue?.path).toEqual(["inquiryType"]);
+      expect(issue?.message).toBe("Please select an inquiry type");
+    }
+  });
 });

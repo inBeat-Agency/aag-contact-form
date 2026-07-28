@@ -161,139 +161,143 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
           }}
         />
 
-        {inquiryType ? (
-          <>
-            <div className="aag-form-row">
-              <TextField
-                id="aag-form-firstName"
-                label="First Name"
-                placeholder="Jane"
-                autoComplete="given-name"
-                error={errors.firstName?.message}
-                {...register("firstName")}
-              />
-              <TextField
-                id="aag-form-lastName"
-                label="Last Name"
-                placeholder="Smith"
-                autoComplete="family-name"
-                error={errors.lastName?.message}
-                {...register("lastName")}
-              />
-            </div>
+        {/*
+          The body renders unconditionally. On the placeholder (`inquiryType`
+          is "") every `show*` gate below is false, so the form previews the
+          General Question field set — common fields only. This is a
+          PRESENTATION default: `inquiryType` stays "" in form state, so
+          submitting from here fails validation instead of silently filing the
+          lead as a General Question.
+        */}
+        <div className="aag-form-row">
+          <TextField
+            id="aag-form-firstName"
+            label="First Name"
+            placeholder="Jane"
+            autoComplete="given-name"
+            error={errors.firstName?.message}
+            {...register("firstName")}
+          />
+          <TextField
+            id="aag-form-lastName"
+            label="Last Name"
+            placeholder="Smith"
+            autoComplete="family-name"
+            error={errors.lastName?.message}
+            {...register("lastName")}
+          />
+        </div>
 
+        <TextField
+          id="aag-form-workEmail"
+          label="Work Email"
+          type="email"
+          placeholder="jane@company.com"
+          autoComplete="email"
+          error={errors.workEmail?.message}
+          {...register("workEmail")}
+        />
+
+        {showBusiness ? (
+          <div className="aag-form-row">
             <TextField
-              id="aag-form-workEmail"
-              label="Work Email"
-              type="email"
-              placeholder="jane@company.com"
-              autoComplete="email"
-              error={errors.workEmail?.message}
-              {...register("workEmail")}
+              id="aag-form-title"
+              label="Title"
+              placeholder="Head of Talent"
+              autoComplete="organization-title"
+              error={errors.title?.message}
+              {...register("title")}
             />
-
-            {showBusiness ? (
-              <div className="aag-form-row">
-                <TextField
-                  id="aag-form-title"
-                  label="Title"
-                  placeholder="Head of Talent"
-                  autoComplete="organization-title"
-                  error={errors.title?.message}
-                  {...register("title")}
-                />
-                <TextField
-                  id="aag-form-company"
-                  label="Company"
-                  placeholder="Acme Inc."
-                  autoComplete="organization"
-                  error={errors.company?.message}
-                  {...register("company")}
-                />
-              </div>
-            ) : null}
-
-            {showBusiness ? (
-              <div className="aag-form-row">
-                <TextField
-                  id="aag-form-phone"
-                  label="Phone"
-                  type="tel"
-                  optional
-                  placeholder="+1 555 000 0000"
-                  autoComplete="tel"
-                  error={errors.phone?.message}
-                  {...register("phone")}
-                />
-                <SelectField
-                  id="aag-form-companySize"
-                  label="Company Size"
-                  optional
-                  placeholder="Select an option"
-                  options={COMPANY_SIZES}
-                  error={errors.companySize?.message}
-                  {...register("companySize")}
-                />
-              </div>
-            ) : null}
-
-            {showEngagement ? (
-              <div className="aag-form-row">
-                <SelectField
-                  id="aag-form-estimatedBudget"
-                  label="Estimated Budget"
-                  optional
-                  placeholder="Select an option"
-                  options={BUDGETS}
-                  error={errors.estimatedBudget?.message}
-                  {...register("estimatedBudget")}
-                />
-                <SelectField
-                  id="aag-form-expectedTimeline"
-                  label="Expected Timeline"
-                  optional
-                  placeholder="Select an option"
-                  options={TIMELINES}
-                  error={errors.expectedTimeline?.message}
-                  {...register("expectedTimeline")}
-                />
-              </div>
-            ) : null}
-
-            {showResume ? (
-              <FileField
-                id="aag-form-resume"
-                label="Upload Resume"
-                accept={RESUME_ACCEPT}
-                error={errors.resume?.message as string | undefined}
-                {...register("resume")}
-              />
-            ) : null}
-
-            <TextareaField
-              id="aag-form-message"
-              label="How can we help you?"
-              placeholder="Tell us about your needs..."
-              error={errors.message?.message}
-              {...register("message")}
+            <TextField
+              id="aag-form-company"
+              label="Company"
+              placeholder="Acme Inc."
+              autoComplete="organization"
+              error={errors.company?.message}
+              {...register("company")}
             />
-
-            {status === "error" ? (
-              <div className="aag-form-banner" role="alert">
-                Something went wrong. Please try again or email{" "}
-                hello@alphaapexgroup.com.
-              </div>
-            ) : null}
-
-            <button
-              type="submit"
-              className="aag-form-submit"
-              disabled={status === "submitting"}
-            >
-              {status === "submitting" ? "Submitting\u2026" : "Submit"}
-            </button>
-          </>
+          </div>
         ) : null}
+
+        {showBusiness ? (
+          <div className="aag-form-row">
+            <TextField
+              id="aag-form-phone"
+              label="Phone"
+              type="tel"
+              optional
+              placeholder="+1 555 000 0000"
+              autoComplete="tel"
+              error={errors.phone?.message}
+              {...register("phone")}
+            />
+            <SelectField
+              id="aag-form-companySize"
+              label="Company Size"
+              optional
+              placeholder="Select an option"
+              options={COMPANY_SIZES}
+              error={errors.companySize?.message}
+              {...register("companySize")}
+            />
+          </div>
+        ) : null}
+
+        {showEngagement ? (
+          <div className="aag-form-row">
+            <SelectField
+              id="aag-form-estimatedBudget"
+              label="Estimated Budget"
+              optional
+              placeholder="Select an option"
+              options={BUDGETS}
+              error={errors.estimatedBudget?.message}
+              {...register("estimatedBudget")}
+            />
+            <SelectField
+              id="aag-form-expectedTimeline"
+              label="Expected Timeline"
+              optional
+              placeholder="Select an option"
+              options={TIMELINES}
+              error={errors.expectedTimeline?.message}
+              {...register("expectedTimeline")}
+            />
+          </div>
+        ) : null}
+
+        {showResume ? (
+          <FileField
+            id="aag-form-resume"
+            label="Upload Resume"
+            accept={RESUME_ACCEPT}
+            error={errors.resume?.message as string | undefined}
+            {...register("resume")}
+          />
+        ) : null}
+
+        <TextareaField
+          id="aag-form-message"
+          label="How can we help you?"
+          placeholder="Tell us about your needs..."
+          error={errors.message?.message}
+          {...register("message")}
+        />
+
+        {status === "error" ? (
+          <div className="aag-form-banner" role="alert">
+            Something went wrong. Please try again or email{" "}
+            hello@alphaapexgroup.com.
+          </div>
+        ) : null}
+
+        <button
+          type="submit"
+          className="aag-form-submit"
+          disabled={status === "submitting"}
+        >
+          {status === "submitting" ? "Submitting\u2026" : "Submit"}
+        </button>
       </form>
     </div>
   );

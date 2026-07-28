@@ -32,24 +32,108 @@ async function selectInquiry(label: string) {
   return user;
 }
 
-describe("ContactForm — initial render (progressive disclosure)", () => {
-  it("shows the inquiry select without a widget-owned header or personal fields", () => {
+describe("ContactForm — initial render (placeholder preview)", () => {
+  it("shows the inquiry select without a widget-owned header", () => {
     renderForm();
 
     expect(screen.getByLabelText("Inquiry type")).toBeInTheDocument();
+    // The heading/subtitle copy intentionally lives in Webflow, not the widget.
     expect(screen.queryByText("Contact Us")).not.toBeInTheDocument();
     expect(
       screen.queryByText("Select the nature of your inquiry to get started."),
     ).not.toBeInTheDocument();
 
-    // Nothing past the inquiry select is disclosed until a type is chosen.
-    expect(screen.queryByLabelText("First Name")).not.toBeInTheDocument();
+    // The placeholder previews the General Question field set on first load.
+    expect(screen.getByLabelText("First Name")).toBeInTheDocument();
+    expect(screen.getByLabelText("How can we help you?")).toBeInTheDocument();
     expect(
-      screen.queryByLabelText("How can we help you?"),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: /submit/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("previews exactly the General Question field set while on the placeholder", () => {
+    renderForm();
+
+    expect(screen.getByLabelText("Inquiry type")).toHaveValue("");
+
+    // Common fields (the General Question set) are previewed.
+    expect(screen.getByLabelText("First Name")).toBeInTheDocument();
+    expect(screen.getByLabelText("Last Name")).toBeInTheDocument();
+    expect(screen.getByLabelText("Work Email")).toBeInTheDocument();
+    expect(screen.getByLabelText("How can we help you?")).toBeInTheDocument();
+
+    // Nothing type-specific leaks into the preview.
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Company")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Phone/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Company Size/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Estimated Budget/)).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /submit/i }),
+      screen.queryByLabelText(/Expected Timeline/),
     ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Upload Resume")).not.toBeInTheDocument();
+  });
+
+  it("fails validation with a human-readable inquiry error when submitted on the placeholder", async () => {
+    renderForm();
+    const user = userEvent.setup();
+
+    // Fill every previewed field so the ONLY thing missing is the inquiry type.
+    await user.type(screen.getByLabelText("First Name"), "Jane");
+    await user.type(screen.getByLabelText("Last Name"), "Smith");
+    await user.type(screen.getByLabelText("Work Email"), "jane@company.com");
+    await user.type(
+      screen.getByLabelText("How can we help you?"),
+      "Just a question.",
+    );
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    // The error must land on the inquiry select itself, not float loose.
+    const inquirySelect = screen.getByLabelText("Inquiry type");
+    await waitFor(() =>
+      expect(inquirySelect).toHaveAttribute("aria-invalid", "true"),
+    );
+    const describedBy = inquirySelect.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(document.getElementById(describedBy as string)).toHaveTextContent(
+      "Please select an inquiry type",
+    );
+
+    // Zod's raw discriminator message must never reach the user.
+    expect(
+      screen.queryByText(/Invalid discriminator value/i),
+    ).not.toBeInTheDocument();
+
+    // A placeholder submission must never be filed as a lead.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps values typed in the preview when a real inquiry type is chosen", async () => {
+    renderForm();
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText("First Name"), "Jane");
+    await user.type(screen.getByLabelText("Last Name"), "Smith");
+    await user.type(screen.getByLabelText("Work Email"), "jane@company.com");
+    await user.type(
+      screen.getByLabelText("How can we help you?"),
+      "We need help with hiring.",
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText("Inquiry type"),
+      "Consulting",
+    );
+
+    expect(screen.getByLabelText("First Name")).toHaveValue("Jane");
+    expect(screen.getByLabelText("Last Name")).toHaveValue("Smith");
+    expect(screen.getByLabelText("Work Email")).toHaveValue(
+      "jane@company.com",
+    );
+    expect(screen.getByLabelText("How can we help you?")).toHaveValue(
+      "We need help with hiring.",
+    );
   });
 });
 
