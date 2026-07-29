@@ -163,7 +163,7 @@ Flat, camelCase keys. Optional fields are omitted when empty.
 | `company` | string | engagement types | Same as above |
 | `phone` | string | optional | Loosely validated. Consulting / Recruitment / Submit Resume |
 | `companySize` | string | optional | Consulting / Recruitment only: `1-50`, `51-200`, `201-1,000`, `1,000+`. **Not sent for Submit Resume.** |
-| `estimatedBudget` | string | optional | Consulting / Recruitment only: `$30k or less`, `$30k - $50k`, `$50k - $100k`, `Greater than $100k` |
+| `estimatedBudget` | string | optional | Consulting / Recruitment only: `Not yet defined`, `Under $50K`, `$50K – $150K`, `$150K – $300K`, `$300K+` |
 | `expectedTimeline` | string | optional | Consulting / Recruitment only: `ASAP`, `1-3 months`, `1-6 months`, `6+ months` |
 | `resume` | File | Submit Resume only | `.pdf/.doc/.docx`, ≤ 10MB |
 | `source` | string | when configured | Value of `data-source` |

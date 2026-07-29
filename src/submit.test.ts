@@ -19,7 +19,7 @@ function makeFields(
     company: "Acme Inc.",
     phone: "+1 555 000 0000",
     companySize: "51-200",
-    estimatedBudget: "$30k - $50k",
+    estimatedBudget: "$50K – $150K",
     expectedTimeline: "1-3 months",
     message: "We need help with hiring.",
     resume: null,
@@ -97,7 +97,7 @@ describe("buildFormData", () => {
     expect(data.get("company")).toBe("Acme Inc.");
     expect(data.get("phone")).toBe("+1 555 000 0000");
     expect(data.get("companySize")).toBe("51-200");
-    expect(data.get("estimatedBudget")).toBe("$30k - $50k");
+    expect(data.get("estimatedBudget")).toBe("$50K – $150K");
     expect(data.get("expectedTimeline")).toBe("1-3 months");
   });
 

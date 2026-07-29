@@ -25,10 +25,11 @@ export type InquiryType = (typeof INQUIRY_TYPES)[number];
 export const COMPANY_SIZES = ["1-50", "51-200", "201-1,000", "1,000+"] as const;
 
 export const BUDGETS = [
-  "$30k or less",
-  "$30k - $50k",
-  "$50k - $100k",
-  "Greater than $100k",
+  "Not yet defined",
+  "Under $50K",
+  "$50K – $150K",
+  "$150K – $300K",
+  "$300K+",
 ] as const;
 
 export const TIMELINES = ["ASAP", "1-3 months", "1-6 months", "6+ months"] as const;
