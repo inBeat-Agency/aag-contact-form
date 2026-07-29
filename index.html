@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AAG Contact Form — Dev Harness</title>
+    <!--
+      Dev harness only — NOT part of the shipped bundle.
+
+      The widget mounts into the light DOM of the Webflow page, where the fields
+      and the submit button are styled by the site's style-guide classes
+      (form_input, is-text-area, is-select-input, button, form_message-*).
+      Without this stylesheet `npm run dev` would render an unstyled form.
+
+      It is loaded before the widget script so the runtime-injected <style>
+      lands after it, matching the cascade order of the real embed.
+    -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.prod.website-files.com/6a0ca69da43f144687f39b63/css/alpha-apex-group.webflow.shared.14756c4ad.css"
+    />
     <style>
       body {
         margin: 0;

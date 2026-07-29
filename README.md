@@ -59,18 +59,57 @@ The script is safe to place in the site `<head>`: it waits for
 
 ### Theming
 
-The widget is width-fluid and fills its container. Two-column rows collapse to a
-single column below a ~560px container width. Override the accent (or other
-tokens) by setting CSS custom properties on the mount div:
+The widget mounts into the **light DOM** — there is no Shadow DOM — so the
+Webflow site stylesheet cascades into it. The fields and the submit button carry
+the Webflow style-guide classes, which means **Webflow is the source of truth for
+their visual identity**:
+
+| Element | Classes | Edited in |
+| --- | --- | --- |
+| Text / email / tel input | `form_input w-input` | Webflow Designer |
+| Select | `form_input is-select-input w-select` | Webflow Designer |
+| Textarea | `form_input is-text-area w-input` | Webflow Designer |
+| Submit button | `button is-form-submit w-button` | Webflow Designer |
+| Error banner | `form_message-error` | Webflow Designer |
+| Success panel | `form_message-success` | Webflow Designer |
+| Field wrapper / label | `form_field-wrapper` / `form_label` | Webflow Designer (empty hooks today) |
+
+Restyle any of these in the Designer and the widget follows automatically, in
+sync with every other form on the site. The widget's own CSS **deliberately
+declares no border, padding, height, colour or typography** for them — its
+runtime-injected `<style>` lands *after* the Webflow stylesheet, so at equal
+specificity any competing declaration here would silently beat the Designer.
+`src/styles.test.ts` guards both halves of that contract.
+
+The message-class contract is **only** `form_message-error` and
+`form_message-success`. Do **not** add `w-form-fail` or `w-form-done` to either
+message element.
+Webflow's base stylesheet hides those classes with `display: none`, expecting
+Webflow's form JavaScript to reveal them. This React widget conditionally
+renders messages itself and does not run that JavaScript.
+
+Layout and behaviour still live in the widget's own `aag-form-` prefixed CSS:
+the flex/grid rhythm, the container query that collapses two-column rows below a
+420px *container* width, the honeypot, the file input (Webflow has no class for
+`<input type="file">`) and the inline per-field error text. `--aag-form-gap` and
+`--aag-form-radius` remain overridable on the mount div.
+
+There is one deliberate override:
 
 ```css
-#aag-contact-form {
-  --aag-form-accent: #1928c8;
-  --aag-form-radius: 10px;
-}
+.aag-form-root .form_input { margin-bottom: 0; }
 ```
 
-All classes are prefixed `aag-form-` to avoid colliding with Webflow styles.
+Webflow's `.form_input` ships `margin-bottom: .75rem` for stacked native Webflow
+forms. This widget spaces fields with flex `gap`, so that margin double-counts
+and produces uneven vertical rhythm. Neutralising it keeps layout with the
+widget while leaving every visual property to Webflow. A matching
+`.aag-form-root .button[disabled] { opacity: .65 }` supplies the in-flight
+submit state, which the style guide does not define.
+
+When developing locally, `index.html` loads the published Webflow stylesheet so
+`npm run dev` mirrors the embedded environment. That link is dev-harness only and
+is never part of the shipped bundle.
 
 ## Cloudflare Pages delivery
 
@@ -144,7 +183,7 @@ src/
   submit.ts        # FormData builder + fetch with configurable 60s default timeout
   ContactForm.tsx  # the form component (progressive disclosure, states, honeypot)
   main.tsx         # self-mounting entry point (reads data attributes)
-  styles.css       # aag-form- prefixed styles, custom properties, container query
-index.html         # dev harness with a mocked backend
+  styles.css       # layout-only widget CSS (Webflow owns field/button visuals)
+index.html         # dev harness with a mocked backend + the Webflow stylesheet
 vite.config.ts     # single-file IIFE build (CSS injected by JS)
 ```

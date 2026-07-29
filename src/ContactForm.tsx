@@ -116,8 +116,14 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
 
   if (status === "success") {
     return (
-      <div className="aag-form-root">
-        <div className="aag-form-success" role="status">
+      <div className="aag-form-root form_component w-form">
+        {/*
+          `form_message-success` carries the Webflow styling, but the Webflow
+          base classes `w-form-done` / `w-form-fail` are deliberately NOT used:
+          they ship `display: none` and are toggled by Webflow's own form JS,
+          which this widget does not load. React controls visibility here.
+        */}
+        <div className="aag-form-success form_message-success" role="status">
           <p className="aag-form-success-title">Thanks!</p>
           <p className="aag-form-success-text">
             We&rsquo;ll get back to you within one business day.
@@ -148,9 +154,9 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
   ) : null;
 
   return (
-    <div className="aag-form-root">
+    <div className="aag-form-root form_component w-form">
       <form
-        className="aag-form-form"
+        className="aag-form-form form_form"
         onSubmit={handleFormSubmit}
         noValidate
       >
@@ -298,7 +304,7 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
         />
 
         {status === "error" ? (
-          <div className="aag-form-banner" role="alert">
+          <div className="aag-form-banner form_message-error" role="alert">
             Something went wrong. Please try again or email{" "}
             hello@alphaapexgroup.com.
           </div>
@@ -306,7 +312,7 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
 
         <button
           type="submit"
-          className="aag-form-submit"
+          className="button is-form-submit w-button"
           disabled={status === "submitting"}
         >
           {status === "submitting" ? "Submitting\u2026" : "Submit"}

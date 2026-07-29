@@ -1,19 +1,23 @@
 /*
  * AAG Contact Us widget styles.
- * - Every class is prefixed `aag-form-` to avoid colliding with Webflow classes.
- * - No bare tag selectors are styled globally; everything is scoped under the
- *   `.aag-form-root` container.
- * - Theming happens through CSS custom properties on the root so the host site
- *   can override the accent, radius, etc.
+ *
+ * The widget mounts into the LIGHT DOM of the Webflow page, so the site
+ * stylesheet cascades into it. Fields and the submit button carry the Webflow
+ * style-guide classes (`form_input`, `is-text-area`, `is-select-input`,
+ * `button`, `form_message-error`, `form_message-success`) and are therefore
+ * styled from the Webflow Designer — this file deliberately does NOT declare
+ * their border, padding, height, colour or typography.
+ *
+ * What stays here is layout and function: flex/grid rhythm, the container
+ * query, the honeypot, the file input (no Webflow equivalent) and inline field
+ * errors. Every remaining `aag-form-` class is prefixed to avoid colliding with
+ * Webflow classes, and nothing is styled through bare tag selectors.
  */
 
 .aag-form-root {
   container-type: inline-size;
   box-sizing: border-box;
   width: 100%;
-  color: var(--aag-form-text, #10131f);
-  font-family: var(--aag-form-font, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
-  background: var(--aag-form-bg, #ffffff);
 }
 
 .aag-form-root *,
@@ -41,74 +45,114 @@
   min-width: 0;
 }
 
-.aag-form-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--aag-form-text, #10131f);
-}
-
 .aag-form-optional {
   font-weight: 400;
-  color: var(--aag-form-muted, #5b6172);
+  color: var(--text-color--text-secondary, #5b6172);
 }
 
-.aag-form-input,
-.aag-form-select,
-.aag-form-textarea {
-  width: 100%;
-  padding: 11px 13px;
-  font-size: 15px;
-  font-family: inherit;
-  color: var(--aag-form-text, #10131f);
-  background: var(--aag-form-field-bg, #ffffff);
-  border: 1px solid var(--aag-form-border, #d7dae2);
-  border-radius: var(--aag-form-radius, 10px);
-  outline: none;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
-  appearance: none;
+/*
+ * Webflow's .form_input carries margin-bottom: .75rem for stacked native
+ * Webflow forms. This widget owns vertical rhythm through flex `gap` on
+ * .aag-form-form / .aag-form-field, so the margin double-counts. Layout stays
+ * with the widget; Webflow keeps full control of border, padding, height,
+ * colour and typography.
+ */
+.aag-form-root .form_input {
+  margin-bottom: 0;
 }
 
-.aag-form-textarea {
-  min-height: 120px;
+/*
+ * Webflow has no disabled-button style. `.button` already transitions opacity,
+ * so this only supplies the value while a submission is in flight.
+ */
+.aag-form-root .button[disabled] {
+  opacity: 0.65;
+  cursor: default;
+}
+
+/*
+ * Invalid-field affordance. The Webflow style guide has no class for an invalid
+ * input, and `aria-invalid` is only ever set by this widget, so this cannot
+ * fight a Webflow declaration in practice — it just colours the border Webflow
+ * already defined when validation fails.
+ */
+.aag-form-root .form_input[aria-invalid="true"],
+.aag-form-file[aria-invalid="true"] {
+  border-color: var(--text-color--text-error, #d1293d);
+}
+
+/*
+ * Keyboard focus affordance — accessibility, not visual identity.
+ *
+ * Webflow's base rule is `.w-input:focus { border-color: #3898ec; outline: 0 }`:
+ * it REMOVES the outline and signals focus only through the border colour. On an
+ * invalid field the `[aria-invalid]` rule above outranks it, so the border stays
+ * red and a keyboard user gets no focus signal at all.
+ *
+ * `outline` is used deliberately: the style guide never declares it on
+ * `.form_input` or `.button`, it does not affect layout, and `currentColor`
+ * inherits whatever palette Webflow assigns — so this restores the affordance
+ * without taking any visual control back from the Designer. Scoped to
+ * `:focus-visible` so it appears for keyboard navigation, not mouse clicks.
+ */
+.aag-form-root .form_input:focus-visible,
+.aag-form-root .aag-form-file:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+/*
+ * The button needs the offset INVERTED. Its `currentColor` is the light text
+ * Webflow puts on a dark fill, so an outset ring would be drawn on the page
+ * background behind the button — light on light, effectively invisible. Drawing
+ * it inside the fill keeps `currentColor` contrasting against the button's own
+ * background, whatever palette the Designer assigns.
+ */
+.aag-form-root .button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -3px;
+}
+
+/*
+ * Webflow sizes the textarea but declares no `resize`, leaving the browser
+ * default of `both` — dragging it horizontally overflows the widget's grid.
+ * Vertical-only resizing is behaviour, not styling.
+ */
+.aag-form-root .form_input.is-text-area {
   resize: vertical;
 }
 
-.aag-form-select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%235b6172' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 13px center;
-  padding-right: 34px;
-  cursor: pointer;
+/*
+ * Same double-count as `.form_input` above: `.form_message-error` ships
+ * `margin-top: .75rem` for stacked native Webflow forms, which stacks on top of
+ * this widget's flex `gap`.
+ */
+.aag-form-root .form_message-error {
+  margin-top: 0;
 }
 
-.aag-form-input:focus,
-.aag-form-select:focus,
-.aag-form-textarea:focus {
-  border-color: var(--aag-form-border-focus, var(--aag-form-accent, #1928c8));
-  box-shadow: 0 0 0 3px rgba(25, 40, 200, 0.14);
+/*
+ * Webflow clears the native focus outline. Invalid controls need their own
+ * visible keyboard-focus indicator without changing the valid-control styling.
+ */
+.aag-form-root .form_input[aria-invalid="true"]:focus-visible,
+.aag-form-root .aag-form-file[aria-invalid="true"]:focus-visible {
+  outline: 2px solid var(--text-color--text-error, #d1293d);
+  outline-offset: 2px;
 }
 
-.aag-form-input[aria-invalid="true"],
-.aag-form-select[aria-invalid="true"],
-.aag-form-textarea[aria-invalid="true"],
-.aag-form-file[aria-invalid="true"] {
-  border-color: var(--aag-form-error, #d1293d);
+/* Widget-owned layout containment: keep textarea resizing vertical so it cannot break the column layout. */
+.aag-form-root .form_input.is-text-area {
+  resize: vertical;
 }
 
-.aag-form-input[aria-invalid="true"]:focus,
-.aag-form-select[aria-invalid="true"]:focus,
-.aag-form-textarea[aria-invalid="true"]:focus {
-  box-shadow: 0 0 0 3px rgba(209, 41, 61, 0.14);
-}
-
+/* File input: Webflow's style guide has no class for `<input type="file">`. */
 .aag-form-file {
   width: 100%;
   padding: 10px 13px;
   font-size: 14px;
   font-family: inherit;
-  color: var(--aag-form-text, #10131f);
-  background: var(--aag-form-field-bg, #ffffff);
-  border: 1px dashed var(--aag-form-border, #d7dae2);
+  border: 1px dashed var(--border-color--border-primary, #d7dae2);
   border-radius: var(--aag-form-radius, 10px);
   cursor: pointer;
 }
@@ -118,50 +162,25 @@
   padding: 7px 12px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--aag-form-accent, #1928c8);
-  background: rgba(25, 40, 200, 0.08);
   border: none;
   border-radius: var(--aag-form-radius, 10px);
   cursor: pointer;
 }
 
+/*
+ * Inline, per-field error text. Deliberately NOT `.form_message-error`: that
+ * Webflow class is a full-width banner with its own background and padding,
+ * which is wrong directly under a single field.
+ */
 .aag-form-error {
   font-size: 12.5px;
-  color: var(--aag-form-error, #d1293d);
+  color: var(--text-color--text-error, #d1293d);
   line-height: 1.35;
 }
 
-.aag-form-banner {
-  padding: 12px 14px;
-  font-size: 14px;
-  color: var(--aag-form-error, #d1293d);
-  background: rgba(209, 41, 61, 0.08);
-  border: 1px solid rgba(209, 41, 61, 0.35);
-  border-radius: var(--aag-form-radius, 10px);
-}
-
-.aag-form-submit {
-  width: 100%;
-  padding: 14px 18px;
-  margin-top: 4px;
-  font-size: 15px;
-  font-weight: 600;
-  font-family: inherit;
-  color: #ffffff;
-  background: var(--aag-form-accent, #1928c8);
-  border: none;
-  border-radius: var(--aag-form-radius-pill, 999px);
-  cursor: pointer;
-  transition: background-color 120ms ease, opacity 120ms ease;
-}
-
-.aag-form-submit:hover:not(:disabled) {
-  background: var(--aag-form-accent-hover, #141fa0);
-}
-
-.aag-form-submit:disabled {
-  opacity: 0.65;
-  cursor: default;
+/* The form flex gap supplies banner spacing; reset only the margin that would double it. */
+.aag-form-root .form_message-error {
+  margin-top: 0;
 }
 
 /* Honeypot: hidden from users and assistive tech, present for bots. */
@@ -177,12 +196,9 @@
   border: 0;
 }
 
+/* `form_message-success` owns palette and padding; retain the prior structural centering. */
 .aag-form-success {
-  padding: 28px 24px;
   text-align: center;
-  background: var(--aag-form-field-bg, #ffffff);
-  border: 1px solid var(--aag-form-border, #d7dae2);
-  border-radius: var(--aag-form-radius, 10px);
 }
 
 .aag-form-success-title {
@@ -194,7 +210,6 @@
 .aag-form-success-text {
   margin: 0;
   font-size: 15px;
-  color: var(--aag-form-muted, #5b6172);
   line-height: 1.45;
 }
 
