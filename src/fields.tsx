@@ -32,8 +32,8 @@ export function FieldWrapper({
   children,
 }: FieldWrapperProps) {
   return (
-    <div className="aag-form-field">
-      <label className="aag-form-label" htmlFor={id}>
+    <div className="aag-form-field form_field-wrapper">
+      <label className="aag-form-label form_label" htmlFor={id}>
         {label}
         {optional ? <span className="aag-form-optional"> (Optional)</span> : null}
       </label>
@@ -62,7 +62,7 @@ export const TextField = forwardRef<HTMLInputElement, TextFieldProps>(
           {...inputProps}
           id={id}
           ref={ref}
-          className="aag-form-input"
+          className="form_input w-input"
           required={!optional}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId(id) : undefined}
@@ -92,7 +92,7 @@ export const SelectField = forwardRef<HTMLSelectElement, SelectFieldProps>(
           {...selectProps}
           id={id}
           ref={ref}
-          className="aag-form-select"
+          className="form_input is-select-input w-select"
           defaultValue=""
           required={!optional}
           aria-invalid={error ? true : undefined}
@@ -127,7 +127,7 @@ export const TextareaField = forwardRef<HTMLTextAreaElement, TextareaFieldProps>
           {...textareaProps}
           id={id}
           ref={ref}
-          className="aag-form-textarea"
+          className="form_input is-text-area w-input"
           required={!optional}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId(id) : undefined}
