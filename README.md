@@ -16,8 +16,11 @@ value, so submitting without choosing a type fails and asks for one.
 npm install       # install dependencies
 npm run dev       # local dev harness at http://localhost:5173 (mock endpoint)
 npm run build     # produce the single embeddable bundle in dist/
-npm run test      # run the zod schema unit tests (vitest)
+npm run test      # run the widget + Zapier payload contract tests (vitest)
 ```
+
+`npm run zapier:samples` is a manual tool, not part of the test run — see
+[Zapier delivery](#zapier-delivery-why-a-worker-sits-in-the-middle).
 
 `npm run dev` serves `index.html`, which mounts the widget in a full-page panel
 and mocks the backend so submissions resolve locally (watch the console for the
@@ -173,6 +176,93 @@ The canonical contract lives in [`src/schema.ts`](./src/schema.ts) as zod
 schemas and exported TypeScript types — copy it to mirror validation on the
 backend.
 
+### Zapier delivery (why a Worker sits in the middle)
+
+The client's backend is a **Zapier Catch Hook**, and Zapier only accepts XML,
+JSON or URL-encoded bodies. It **silently discards `multipart/form-data` and
+still answers HTTP 200** — so an unconverted submission looks successful to the
+widget while the lead is dropped on the floor.
+
+The widget still sends `multipart/form-data`; nothing above changes. A
+Cloudflare Worker sits between the widget and Zapier and performs the
+conversion: it receives the multipart body, uploads the resume to object
+storage, and forwards flat JSON to the hook.
+
+```text
+widget ──multipart──> Cloudflare Worker ──JSON──> Zapier Catch Hook
+                             │
+                             └─ resume file ──> object storage (returns resumeUrl)
+```
+
+The transform is [`worker/src/payload.ts`](./worker/src/payload.ts). Its
+contract tests build their input with the widget's own `buildFormData()`, so a
+renamed or added widget field fails the suite instead of silently breaking the
+Zap.
+
+#### Zapier JSON payload
+
+Flat, camelCase, **all values are strings**. No nulls, numbers, arrays or nested
+objects.
+
+**Every one of the 15 keys is always present.** Fields that do not apply to the
+submitted `inquiryType` carry the empty string `""` — they are never omitted and
+never `null`. This is deliberate: Zapier builds its field-mapping picker from
+whichever sample payload it happened to receive, so a payload that pruned empty
+keys would leave those fields unmappable. One complete, stable schema means one
+Zap mapping works for all four inquiry types. **Do not "clean up" the payload by
+dropping empty keys.**
+
+| Key | Notes |
+| --- | --- |
+| `inquiryType` | One of: `Recruitment / Hiring`, `Consulting`, `General Question`, `Submit Resume` |
+| `firstName` | |
+| `lastName` | |
+| `workEmail` | |
+| `title` | |
+| `company` | |
+| `phone` | Free-form |
+| `companySize` | `1-50`, `51-200`, `201-1,000`, `1,000+` |
+| `estimatedBudget` | `Not yet defined`, `Under $50K`, `$50K – $150K`, `$150K – $300K`, `$300K+` |
+| `expectedTimeline` | `ASAP`, `1-3 months`, `1-6 months`, `6+ months` |
+| `message` | |
+| `resumeUrl` | Object-storage URL written by the Worker after upload |
+| `resumeFileName` | Original file name of the uploaded resume |
+| `source` | Value of `data-source` |
+| `submittedAt` | ISO-8601, e.g. `2026-07-30T14:18:41.000Z` |
+
+Population by inquiry type — `•` populated, `""` always empty:
+
+| Key | General Question | Consulting | Recruitment / Hiring | Submit Resume |
+| --- | --- | --- | --- | --- |
+| `inquiryType`, `firstName`, `lastName`, `workEmail`, `message`, `source`, `submittedAt` | • | • | • | • |
+| `title`, `company` | `""` | • required | • required | `""` |
+| `companySize` | `""` | • optional | • optional | `""` |
+| `phone` | `""` | • optional | • optional | • optional |
+| `estimatedBudget`, `expectedTimeline` | `""` | • optional | • optional | `""` |
+| `resumeUrl`, `resumeFileName` | `""` | `""` | `""` | • |
+
+> **Branch on `inquiryType` only.** Never write a Zapier Filter or Path that
+> matches on `estimatedBudget`. Its range values use an **EN DASH** (`–`,
+> U+2013), not an ASCII hyphen (`-`) — `"$50K – $150K"` is correct and
+> `"$50K - $150K"` is not. An exact-match Filter built by retyping the value
+> will look right and silently never fire.
+
+Four golden fixtures in [`worker/fixtures/`](./worker/fixtures) show one
+realistic payload per inquiry type. They are the contract artifact: read them
+first when wiring the Zap.
+
+To (re)teach Zapier the field mapping, replay the fixtures at the hook:
+
+```bash
+ZAPIER_HOOK_URL="https://hooks.zapier.com/hooks/catch/…" npm run zapier:samples
+```
+
+The hook URL is a credential — pass it through the environment, never commit it.
+Zapier's trigger sample picker only lists the 3 most recent webhooks from the
+past hour, so the oldest of the four will not appear. That is fine: every
+fixture carries the complete key set, so any single one teaches Zapier the whole
+schema.
+
 ## Project structure
 
 ```
@@ -184,6 +274,16 @@ src/
   ContactForm.tsx  # the form component (progressive disclosure, states, honeypot)
   main.tsx         # self-mounting entry point (reads data attributes)
   styles.css       # layout-only widget CSS (Webflow owns field/button visuals)
+worker/
+  src/payload.ts       # pure multipart -> Zapier JSON transform (no React, no zod)
+  src/payload.test.ts  # contract test, driven by the widget's real buildFormData()
+  fixtures/*.json      # four golden payloads, one per inquiry type (the artifact)
+scripts/
+  send-zapier-samples.ts  # manual fixture replay against the Catch Hook
 index.html         # dev harness with a mocked backend + the Webflow stylesheet
 vite.config.ts     # single-file IIFE build (CSS injected by JS)
 ```
+
+The widget bundle builds only from `src/` — `worker/` and `scripts/` are
+typechecked by `tsc -b` (via `tsconfig.worker.json`) but never enter
+`dist/aag-contact-form.js`.
