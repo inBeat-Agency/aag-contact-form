@@ -9,6 +9,12 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    // worker/ holds the Zapier payload contract tests. They are pure and
+    // network-free, but they must run in CI or the contract silently rots.
+    include: [
+      "src/**/*.test.ts",
+      "src/**/*.test.tsx",
+      "worker/**/*.test.ts",
+    ],
   },
 });
