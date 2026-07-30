@@ -1,17 +1,17 @@
 {
   "inquiryType": "General Question",
-  "firstName": "Priya",
-  "lastName": "Raghavan",
-  "workEmail": "priya.raghavan@northwind-health.org",
+  "firstName": "Felipe",
+  "lastName": "Test",
+  "workEmail": "felipe.test+general-question@example.com",
   "title": "",
   "company": "",
   "phone": "",
   "companySize": "",
   "estimatedBudget": "",
   "expectedTimeline": "",
-  "message": "Do you publish case studies for healthcare clients? I would like to share one with our board before we start a formal conversation.",
+  "message": "[TEST DATA - NOT A REAL INQUIRY] Sample General Question submission. Only the fields common to every inquiry type are populated here.",
   "resumeUrl": "",
   "resumeFileName": "",
-  "source": "webflow/contact-page",
+  "source": "TEST-SAMPLE",
   "submittedAt": "2026-07-30T14:12:05.000Z"
 }
