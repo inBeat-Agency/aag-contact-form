@@ -1,0 +1,17 @@
+{
+  "inquiryType": "General Question",
+  "firstName": "Felipe",
+  "lastName": "Test",
+  "workEmail": "felipe.test+general-question@example.com",
+  "title": "",
+  "company": "",
+  "phone": "",
+  "companySize": "",
+  "estimatedBudget": "",
+  "expectedTimeline": "",
+  "message": "[TEST DATA - NOT A REAL INQUIRY] Sample General Question submission. Only the fields common to every inquiry type are populated here.",
+  "resumeUrl": "",
+  "resumeFileName": "",
+  "source": "TEST-SAMPLE",
+  "submittedAt": "2026-07-30T14:12:05.000Z"
+}

@@ -1,0 +1,240 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+
+import { buildFormData } from "../../src/submit";
+import {
+  BUDGETS,
+  COMPANY_SIZES,
+  INQUIRY_TYPES,
+  TIMELINES,
+} from "../../src/schema";
+import type { ContactFormFields } from "../../src/schema";
+import {
+  toZapierPayload,
+  ZAPIER_PAYLOAD_KEYS,
+  type ZapierPayload,
+} from "./payload";
+
+/**
+ * Contract test for the widget -> Zapier transform.
+ *
+ * The input is built with the widget's real `buildFormData()`, never a
+ * hand-rolled FormData. That is the whole point: if someone renames, drops or
+ * adds a field in the widget and forgets the Worker, this suite goes red.
+ *
+ * There is no network here and there must never be. The transform is pure, and
+ * the fixtures in `worker/fixtures/` are the artifact the backend team reads.
+ */
+
+const FIXTURE_NAMES = [
+  "general-question",
+  "consulting",
+  "recruitment-hiring",
+  "submit-resume",
+] as const;
+
+type FixtureName = (typeof FIXTURE_NAMES)[number];
+
+// Resolved from the project root, matching src/bundle.test.ts. The jsdom
+// environment rewrites `import.meta.url` to the document origin, so a
+// URL-relative lookup would resolve outside the repo.
+function fixturePath(name: FixtureName): string {
+  return resolve(process.cwd(), "worker/fixtures", `${name}.json`);
+}
+
+function readFixtureRaw(name: FixtureName): string {
+  return readFileSync(fixturePath(name), "utf8");
+}
+
+function readFixture(name: FixtureName): ZapierPayload {
+  return JSON.parse(readFixtureRaw(name)) as ZapierPayload;
+}
+
+/**
+ * Rebuild the widget-side form state that would have produced a fixture, so the
+ * sample data lives in exactly one place: the fixture file itself.
+ */
+function widgetFieldsFor(
+  fixture: ZapierPayload,
+  resume: File | null = null,
+): ContactFormFields {
+  return {
+    inquiryType: fixture.inquiryType as ContactFormFields["inquiryType"],
+    firstName: fixture.firstName,
+    lastName: fixture.lastName,
+    workEmail: fixture.workEmail,
+    title: fixture.title,
+    company: fixture.company,
+    phone: fixture.phone,
+    companySize: fixture.companySize,
+    estimatedBudget: fixture.estimatedBudget,
+    expectedTimeline: fixture.expectedTimeline,
+    message: fixture.message,
+    resume,
+    website: "", // honeypot, never transported
+  };
+}
+
+/** The resume the candidate would have attached, per the Submit Resume fixture. */
+function resumeFileFor(fixture: ZapierPayload): File | null {
+  if (!fixture.resumeFileName) return null;
+  return new File(["%PDF-1.4 sample resume"], fixture.resumeFileName, {
+    type: "application/pdf",
+  });
+}
+
+/** Run a fixture end to end: widget form state -> FormData -> Zapier payload. */
+function transformFixture(fixture: ZapierPayload): ZapierPayload {
+  const formData = buildFormData(
+    widgetFieldsFor(fixture, resumeFileFor(fixture)),
+    fixture.source,
+  );
+
+  return toZapierPayload(formData, {
+    // The Worker only knows these after it has uploaded the file.
+    resumeUrl: fixture.resumeUrl || undefined,
+    resumeFileName: fixture.resumeFileName || undefined,
+    submittedAt: fixture.submittedAt,
+  });
+}
+
+describe("toZapierPayload", () => {
+  describe.each(FIXTURE_NAMES)("%s", (name) => {
+    const fixture = readFixture(name);
+
+    it("reproduces the golden fixture from the widget's own FormData", () => {
+      expect(transformFixture(fixture)).toStrictEqual(fixture);
+    });
+
+    it("emits all 15 contract keys, in contract order", () => {
+      expect(Object.keys(transformFixture(fixture))).toEqual([
+        ...ZAPIER_PAYLOAD_KEYS,
+      ]);
+    });
+
+    it("emits string values only — no undefined, null, number or object", () => {
+      for (const [key, value] of Object.entries(transformFixture(fixture))) {
+        expect(typeof value, `${key} must be a string`).toBe("string");
+      }
+    });
+
+    it("covers every text field the widget actually sends", () => {
+      const formData = buildFormData(
+        widgetFieldsFor(fixture, resumeFileFor(fixture)),
+        fixture.source,
+      );
+
+      // Anything the widget sends as text must have a home in the payload.
+      // A File entry (the resume) is intentionally out of scope here — the
+      // Worker uploads it and reports back through resumeUrl/resumeFileName.
+      for (const [key, value] of formData.entries()) {
+        if (typeof value !== "string") continue;
+        expect(
+          ZAPIER_PAYLOAD_KEYS as readonly string[],
+          `widget sends "${key}" but the Zapier contract has no such key`,
+        ).toContain(key);
+      }
+    });
+  });
+
+  it("keeps inapplicable fields as empty strings rather than dropping them", () => {
+    // Zapier builds its field-mapping picker from the sample it received, so a
+    // General Question must still advertise the engagement fields.
+    const payload = transformFixture(readFixture("general-question"));
+
+    expect(payload).toMatchObject({
+      title: "",
+      company: "",
+      phone: "",
+      companySize: "",
+      estimatedBudget: "",
+      expectedTimeline: "",
+      resumeUrl: "",
+      resumeFileName: "",
+    });
+    expect(Object.keys(payload)).toHaveLength(ZAPIER_PAYLOAD_KEYS.length);
+  });
+
+  it("never leaks the resume File into the payload", () => {
+    const fixture = readFixture("submit-resume");
+    const file = resumeFileFor(fixture);
+    const formData = buildFormData(widgetFieldsFor(fixture, file), fixture.source);
+
+    // Guard the guard: the input really does carry the binary.
+    expect(formData.get("resume")).toBeInstanceOf(File);
+
+    // No upload happened, so the Worker supplies nothing beyond the timestamp.
+    const payload = toZapierPayload(formData, {
+      submittedAt: fixture.submittedAt,
+    });
+
+    expect("resume" in payload).toBe(false);
+    expect(payload.resumeUrl).toBe("");
+    expect(payload.resumeFileName).toBe("");
+    expect(Object.values(payload).every((v) => typeof v === "string")).toBe(true);
+    expect(JSON.stringify(payload)).not.toContain("%PDF");
+  });
+
+  it("takes submittedAt from options, never from the clock", () => {
+    const fixture = readFixture("consulting");
+    const formData = buildFormData(widgetFieldsFor(fixture), fixture.source);
+
+    const payload = toZapierPayload(formData, {
+      submittedAt: "1999-12-31T23:59:59.000Z",
+    });
+
+    expect(payload.submittedAt).toBe("1999-12-31T23:59:59.000Z");
+  });
+});
+
+describe("golden fixtures", () => {
+  it.each(FIXTURE_NAMES)(
+    "%s stays pretty-printed with 2-space indent and contract key order",
+    (name) => {
+      // These files are the contract artifact the backend team reads, so the
+      // formatting is part of the deliverable, not incidental.
+      const raw = readFixtureRaw(name);
+      expect(raw).toBe(`${JSON.stringify(JSON.parse(raw), null, 2)}\n`);
+      expect(Object.keys(JSON.parse(raw) as ZapierPayload)).toEqual([
+        ...ZAPIER_PAYLOAD_KEYS,
+      ]);
+    },
+  );
+
+  it.each(FIXTURE_NAMES)("%s only uses enum values from src/schema.ts", (name) => {
+    const fixture = readFixture(name);
+
+    expect(INQUIRY_TYPES as readonly string[]).toContain(fixture.inquiryType);
+
+    // Optional selects are either unset ("") or an exact schema option.
+    if (fixture.companySize) {
+      expect(COMPANY_SIZES as readonly string[]).toContain(fixture.companySize);
+    }
+    if (fixture.estimatedBudget) {
+      expect(BUDGETS as readonly string[]).toContain(fixture.estimatedBudget);
+    }
+    if (fixture.expectedTimeline) {
+      expect(TIMELINES as readonly string[]).toContain(fixture.expectedTimeline);
+    }
+  });
+
+  it("uses the EN DASH in budget ranges, not an ASCII hyphen", () => {
+    // A manual test once sent "$50K - $150K" (ASCII hyphen) to Zapier. It would
+    // have silently broken any exact-match Filter step, because src/schema.ts
+    // ships "$50K \u2013 $150K". Pin the character explicitly.
+    const ranges = BUDGETS.filter((budget) => budget.includes("\u2013"));
+    expect(ranges.length).toBeGreaterThan(0);
+
+    const used = FIXTURE_NAMES.map((name) => readFixture(name).estimatedBudget).filter(
+      Boolean,
+    );
+    expect(used.length).toBeGreaterThan(0);
+
+    for (const budget of used) {
+      expect(budget).toContain("\u2013");
+      expect(budget).not.toMatch(/\d+K -/); // ASCII hyphen between amounts
+      expect(BUDGETS as readonly string[]).toContain(budget);
+    }
+  });
+});

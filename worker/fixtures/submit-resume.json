@@ -1,0 +1,17 @@
+{
+  "inquiryType": "Submit Resume",
+  "firstName": "Felipe",
+  "lastName": "Test",
+  "workEmail": "felipe.test+submit-resume@example.com",
+  "title": "",
+  "company": "",
+  "phone": "+1 (555) 555-0102",
+  "companySize": "",
+  "estimatedBudget": "",
+  "expectedTimeline": "",
+  "message": "[TEST DATA - NOT A REAL INQUIRY] Sample Submit Resume submission. No company details; resumeUrl and resumeFileName are populated by the Worker after upload.",
+  "resumeUrl": "https://example.com/test-sample/felipe-test-resume.pdf",
+  "resumeFileName": "felipe-test-resume.pdf",
+  "source": "TEST-SAMPLE",
+  "submittedAt": "2026-07-30T14:31:52.000Z"
+}

@@ -1,0 +1,17 @@
+{
+  "inquiryType": "Recruitment / Hiring",
+  "firstName": "Felipe",
+  "lastName": "Test",
+  "workEmail": "felipe.test+recruitment@example.com",
+  "title": "TEST TITLE",
+  "company": "TEST COMPANY (DO NOT CONTACT)",
+  "phone": "+1 (555) 555-0101",
+  "companySize": "51-200",
+  "estimatedBudget": "$150K – $300K",
+  "expectedTimeline": "ASAP",
+  "message": "[TEST DATA - NOT A REAL INQUIRY] Sample Recruitment / Hiring submission. Same field set as Consulting.",
+  "resumeUrl": "",
+  "resumeFileName": "",
+  "source": "TEST-SAMPLE",
+  "submittedAt": "2026-07-30T14:24:09.000Z"
+}
