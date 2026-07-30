@@ -362,13 +362,17 @@ describe("ContactForm — Submit Resume submission", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(init.body).toBeInstanceOf(FormData);
+    // Interim transport: URL-encoded to Zapier, never multipart. See src/submit.ts.
+    expect(init.body).toBeInstanceOf(URLSearchParams);
+    expect(init.headers).toBeUndefined();
 
-    const body = init.body as FormData;
+    const body = init.body as URLSearchParams;
     expect(body.get("inquiryType")).toBe("Submit Resume");
     expect(body.get("firstName")).toBe("Jane");
-    expect(body.get("resume")).toBeInstanceOf(File);
-    expect((body.get("resume") as File).name).toBe("jane-smith.pdf");
+    // The file itself cannot travel URL-encoded; only its name does.
+    expect(body.get("resumeFileName")).toBe("jane-smith.pdf");
+    expect(body.get("resumeUrl")).toBe("");
+    expect(body.has("resume")).toBe(false);
   });
 
   it("never sends company details, even when they were typed under a previous inquiry type", async () => {
@@ -401,12 +405,15 @@ describe("ContactForm — Submit Resume submission", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    const body = init.body as FormData;
+    const body = init.body as URLSearchParams;
 
     expect(body.get("inquiryType")).toBe("Submit Resume");
-    expect(body.has("title")).toBe(false);
-    expect(body.has("company")).toBe(false);
-    expect(body.has("companySize")).toBe(false);
+    // The Zapier contract always carries all 15 keys, so "not sent" means the
+    // key is present and EMPTY — not absent. What matters is that the values
+    // typed under the previous inquiry type did not leak.
+    expect(body.get("title")).toBe("");
+    expect(body.get("company")).toBe("");
+    expect(body.get("companySize")).toBe("");
   });
 });
 
