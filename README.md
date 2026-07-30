@@ -4,6 +4,37 @@ A standalone, embeddable **Contact Us** form for the Alpha Apex Group Webflow
 site. It is a single React app compiled to one self-mounting IIFE bundle. CSS is
 injected at runtime, so embedding requires only one `<div>` and one `<script>`.
 
+> ## ⚠️ Interim state — staging only, resumes are NOT stored
+>
+> The Cloudflare Worker described further down **does not exist yet**. Until it
+> does, the widget POSTs **directly to the Zapier Catch Hook** as
+> `application/x-www-form-urlencoded`, running the Worker's own transform
+> (`worker/src/payload.ts`) client-side.
+>
+> | | Status |
+> | --- | --- |
+> | General Question, Consulting, Recruitment / Hiring | ✅ fully functional end to end |
+> | Submit Resume | ⚠️ lead arrives, **the file does not** |
+>
+> A resume submission sends `resumeFileName` with the real file name and leaves
+> `resumeUrl` empty. That pair means *"a resume came in, the file is pending"* —
+> filter on it in Zapier and chase the candidate by email. **The uploaded file is
+> discarded by the browser and stored nowhere.** Do not tell the client resumes
+> are being collected.
+>
+> **Staging only. Do not point production at this.** Two reasons: the hook URL
+> sits in `data-endpoint` in the page source where anyone can read and POST to
+> it, and Zapier bills per task, so anyone who finds it can spend the client's
+> quota.
+>
+> **A 200 from Zapier is still not proof of delivery.** Zapier answers `200` with
+> `{"status":"success"}` even for bodies it throws away. Verify leads in the Zap
+> history, never in the browser's network tab.
+>
+> Reverting to the target architecture is a small diff: drop the
+> `worker/src/payload` import in [`src/submit.ts`](./src/submit.ts) and post
+> `formData` again. The `TEMPORARY` comment block there explains every constraint.
+
 The form uses progressive disclosure in a single form (not a multi-step wizard).
 On the **Inquiry type** placeholder it previews the General Question field set
 so the widget never loads empty; choosing a type then reveals that type's
@@ -24,7 +55,7 @@ npm run test      # run the widget + Zapier payload contract tests (vitest)
 
 `npm run dev` serves `index.html`, which mounts the widget in a full-page panel
 and mocks the backend so submissions resolve locally (watch the console for the
-captured FormData).
+captured body — `URLSearchParams` today, `FormData` once the Worker lands).
 
 ## Build output
 
@@ -148,10 +179,16 @@ https://aag-contact-form.pages.dev/aag-contact-form.js?v=<release-or-sha>
 
 ## API contract
 
-The form sends `multipart/form-data` (a `FormData` body) via `POST` to
-`data-endpoint`. A 2xx response is treated as success; anything else shows the
-error banner. Requests time out after 60s by default to accommodate the
-permitted 10MB resume upload.
+The table below is the **internal** shape the widget assembles with
+`buildFormData()`. It is the contract with the Cloudflare Worker and the input
+to the Zapier transform — but it is **not** what currently goes over the wire.
+Today that body is converted and sent as `application/x-www-form-urlencoded`
+(see [the interim notice](#️-interim-state--staging-only-resumes-are-not-stored)
+and [Zapier delivery](#zapier-delivery-why-a-worker-sits-in-the-middle)).
+
+A 2xx response is treated as success; anything else shows the error banner.
+Requests time out after 60s by default to accommodate the permitted 10MB resume
+upload.
 
 Flat, camelCase keys. Optional fields are omitted when empty.
 
@@ -183,16 +220,32 @@ JSON or URL-encoded bodies. It **silently discards `multipart/form-data` and
 still answers HTTP 200** — so an unconverted submission looks successful to the
 widget while the lead is dropped on the floor.
 
-The widget still sends `multipart/form-data`; nothing above changes. A
-Cloudflare Worker sits between the widget and Zapier and performs the
-conversion: it receives the multipart body, uploads the resume to object
-storage, and forwards flat JSON to the hook.
+**Target architecture** — a Cloudflare Worker sits between the widget and Zapier
+and performs the conversion: it receives the multipart body, uploads the resume
+to object storage, and forwards flat JSON to the hook.
 
 ```text
 widget ──multipart──> Cloudflare Worker ──JSON──> Zapier Catch Hook
                              │
                              └─ resume file ──> object storage (returns resumeUrl)
 ```
+
+**What actually runs today** — the Worker is paused, so the widget applies the
+transform itself and posts straight to the hook:
+
+```text
+widget ──url-encoded──> Zapier Catch Hook
+   │
+   └─ resume file ──> nowhere (only resumeFileName travels)
+```
+
+Why URL-encoded and not JSON: `application/json` is **not** CORS-safelisted, so
+a browser fires a preflight `OPTIONS` that Zapier never answers. Zapier's docs
+say plainly *"do not set a custom Content-Type header."* Intersect that with
+Zapier's accepted body types (XML, JSON, URL-encoded) and exactly one option
+survives: `application/x-www-form-urlencoded`, which the browser sets by itself
+from a `URLSearchParams` body. **Never set that header by hand** — it is the one
+line that would break every submission in a real browser.
 
 The transform is [`worker/src/payload.ts`](./worker/src/payload.ts). Its
 contract tests build their input with the widget's own `buildFormData()`, so a
@@ -270,7 +323,7 @@ src/
   schema.ts        # zod discriminated union + exported payload types (the contract)
   schema.test.ts   # vitest unit tests for the schema
   fields.tsx       # accessible field primitives (label/error/aria wiring)
-  submit.ts        # FormData builder + fetch with configurable 60s default timeout
+  submit.ts        # FormData builder + url-encoded Zapier POST (60s default timeout)
   ContactForm.tsx  # the form component (progressive disclosure, states, honeypot)
   main.tsx         # self-mounting entry point (reads data attributes)
   styles.css       # layout-only widget CSS (Webflow owns field/button visuals)
@@ -284,6 +337,13 @@ index.html         # dev harness with a mocked backend + the Webflow stylesheet
 vite.config.ts     # single-file IIFE build (CSS injected by JS)
 ```
 
-The widget bundle builds only from `src/` — `worker/` and `scripts/` are
-typechecked by `tsc -b` (via `tsconfig.worker.json`) but never enter
-`dist/aag-contact-form.js`.
+`scripts/` is typechecked by `tsc -b` (via `tsconfig.worker.json`) and never
+enters `dist/aag-contact-form.js`.
+
+`worker/src/payload.ts` **is** in the bundle today, on purpose: the widget runs
+the Zapier transform client-side while the Worker is paused. It stays under
+`worker/` because that is where it belongs and where it will run — the path is
+the signal that this import is temporary. `src/bundle.test.ts` asserts the
+contract keys are present, so deleting the import to "fix the layering" turns
+the suite red instead of silently returning the widget to a body Zapier
+discards.
