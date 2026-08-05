@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "test": "npm run test:widget && npm run test:worker",
     "test:widget": "vitest run",
-    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "test:worker": "node scripts/test-worker.mjs",
     "test:watch": "vitest",
     "zapier:samples": "tsx scripts/send-zapier-samples.ts"
   },

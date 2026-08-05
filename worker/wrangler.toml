@@ -10,7 +10,17 @@
 
 name = "aag-contact-form-worker"
 main = "src/index.ts"
-compatibility_date = "2026-07-23"
+
+# Must not exceed the date the INSTALLED workerd supports, or every test in the
+# worker suite silently runs against different runtime semantics than a deploy
+# would get - miniflare falls back with a warning nobody reads and CI calls it
+# green. `worker/wrangler.config.test.ts` asserts the relationship, and
+# `scripts/test-worker.mjs` fails the run if the fallback ever happens anyway.
+#
+# To move this forward, upgrade `@cloudflare/vitest-pool-workers` (and with it
+# workerd) FIRST, then raise this date to match. Note the pool-workers pin in
+# `vitest.worker.config.ts`: 0.13.0+ requires vitest 4.
+compatibility_date = "2026-03-10"
 
 workers_dev = true
 
