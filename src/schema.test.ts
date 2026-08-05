@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   contactFormSchema,
+  INQUIRY_TYPES,
   MAX_RESUME_BYTES,
   resumeFileSchema,
 } from "./schema";
@@ -8,7 +9,10 @@ import {
 // one, and reading it here is what makes drift between the two sides fail.
 import {
   ALLOWED_RESUME_EXTENSIONS as SHARED_ALLOWED_RESUME_EXTENSIONS,
+  hasEmailShape,
+  INQUIRY_TYPES as SHARED_INQUIRY_TYPES,
   MAX_RESUME_BYTES as SHARED_MAX_RESUME_BYTES,
+  requiredTextFieldsFor,
 } from "../worker/src/limits";
 
 // Helper to fabricate a File of a given size/type without allocating real bytes.
@@ -285,4 +289,94 @@ describe("discriminated union", () => {
       expect(issue?.message).toBe("Please select an inquiry type");
     }
   });
+});
+
+/**
+ * The widget and the Worker validate the same submission twice, and the only
+ * thing that makes that safe is both sides reading one table. A field required
+ * on the server but optional in the form is a submission the user is told is
+ * fine and the server then throws away - the failure this project is named
+ * after - so the agreement is asserted rather than assumed.
+ */
+describe("widget and Worker cannot diverge on the submission contract", () => {
+  const REQUIRED_BY_TYPE = {
+    "Recruitment / Hiring": ["title", "company"],
+    Consulting: ["title", "company"],
+    "General Question": [],
+    "Submit Resume": [],
+  } as const;
+
+  function completeValues(type: (typeof INQUIRY_TYPES)[number]) {
+    const values: Record<string, unknown> = { inquiryType: type, ...baseContact };
+    for (const field of REQUIRED_BY_TYPE[type]) values[field] = "Something";
+    if (type === "Submit Resume") {
+      values.resume = makeFile("cv.pdf", "application/pdf", 1024);
+    }
+    return values;
+  }
+
+  it("offers exactly the inquiry types the shared module defines", () => {
+    expect([...INQUIRY_TYPES]).toEqual([...SHARED_INQUIRY_TYPES]);
+  });
+
+  it.each(SHARED_INQUIRY_TYPES)("parses a complete %s submission", (type) => {
+    expect(contactFormSchema.safeParse(completeValues(type)).success).toBe(true);
+  });
+
+  /**
+   * The load-bearing direction. For every field the Worker will refuse the
+   * submission over, the form must refuse it first, or the user gets a server
+   * error for something the form told them was complete.
+   */
+  it.each(
+    SHARED_INQUIRY_TYPES.flatMap((type) =>
+      (requiredTextFieldsFor(type) ?? []).map(
+        (field) => [type, field] as [string, string],
+      ),
+    ),
+  )("rejects a %s submission missing %s, exactly as the Worker does", (type, field) => {
+    const values = completeValues(type as (typeof INQUIRY_TYPES)[number]);
+    delete values[field];
+
+    expect(contactFormSchema.safeParse(values).success).toBe(false);
+  });
+
+  /**
+   * Containment, and the direction is deliberate: the server's email check must
+   * accept EVERYTHING the form accepts. A server rule stricter than the client's
+   * silently refuses a candidate whose address the browser called valid.
+   */
+  it.each([
+    "jane@company.com",
+    "jane.doe@example.com",
+    "jane+tag@example.co.uk",
+    "j@sub.domain.example.com",
+    "jane_doe-99@example-corp.com",
+    "JANE.DOE@EXAMPLE.COM",
+    "a@b.co",
+    "first.last+filter@many.sub.domains.example.museum",
+  ])("accepts %p on both sides, never in the form alone", (email) => {
+    const parsed = contactFormSchema.safeParse({
+      inquiryType: "General Question",
+      ...baseContact,
+      workEmail: email,
+    });
+
+    expect(parsed.success).toBe(true);
+    expect(hasEmailShape(email)).toBe(true);
+  });
+
+  it.each(["not-an-email", "jane.doe@", "@example.com", "jane doe@x.com", "jane@example"])(
+    "refuses %p on both sides",
+    (email) => {
+      const parsed = contactFormSchema.safeParse({
+        inquiryType: "General Question",
+        ...baseContact,
+        workEmail: email,
+      });
+
+      expect(parsed.success).toBe(false);
+      expect(hasEmailShape(email)).toBe(false);
+    },
+  );
 });

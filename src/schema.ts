@@ -19,14 +19,14 @@ import {
 // Option constants (kept exported so the UI renders from the same source).
 // ---------------------------------------------------------------------------
 
-export const INQUIRY_TYPES = [
-  "Recruitment / Hiring",
-  "Consulting",
-  "General Question",
-  "Submit Resume",
-] as const;
+/**
+ * RE-EXPORT, not a definition. The list lives in `worker/src/limits.ts` next to
+ * the per-type field requirements the Worker enforces, so the form cannot offer
+ * a category the server does not recognise.
+ */
+export { INQUIRY_TYPES, type InquiryType } from "../worker/src/limits";
 
-export type InquiryType = (typeof INQUIRY_TYPES)[number];
+import type { InquiryType } from "../worker/src/limits";
 
 export const COMPANY_SIZES = ["1-50", "51-200", "201-1,000", "1,000+"] as const;
 

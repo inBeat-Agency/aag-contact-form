@@ -14,7 +14,12 @@ import generalQuestion from "../fixtures/general-question.json";
 import recruitmentHiring from "../fixtures/recruitment-hiring.json";
 import submitResume from "../fixtures/submit-resume.json";
 import worker from "./index";
-import { MAX_RESUME_BYTES, MAX_SUBMISSION_BODY_BYTES } from "./limits";
+import {
+  INQUIRY_TYPES,
+  MAX_RESUME_BYTES,
+  MAX_SUBMISSION_BODY_BYTES,
+  requiredTextFieldsFor,
+} from "./limits";
 import type { ZapierPayload } from "./payload";
 
 /**
@@ -304,6 +309,132 @@ describe("POST /submit - server-side resume validation is authoritative", () => 
 
     expect(response.status).toBe(400);
     await expect(errorCodeOf(response)).resolves.toBe("INVALID_SUBMISSION");
+  });
+});
+
+/**
+ * A complete, accepted submission for each inquiry type, built from the shared
+ * contract rather than from a hand-written list, so a new required field cannot
+ * be added to the schema without these baselines noticing.
+ */
+function completeSubmission(inquiryType: string): FormData {
+  const form = new FormData();
+  form.append("inquiryType", inquiryType);
+  form.append("firstName", "Jane");
+  form.append("lastName", "Doe");
+  form.append("workEmail", "jane.doe@example.com");
+  form.append("message", "Please get in touch about this.");
+  for (const field of requiredTextFieldsFor(inquiryType) ?? []) {
+    if (form.get(field) === null) form.append(field, `${field}-value`);
+  }
+  if (inquiryType === "Submit Resume") {
+    const file = validPdf();
+    form.append("resume", file, file.name);
+  }
+  return form;
+}
+
+describe("POST /submit - the inquiry contract is enforced server-side", () => {
+  /**
+   * W2. Server-side validation checked five common fields for non-emptiness and
+   * stopped there, so `inquiryType: "Bogus"` with `workEmail: "not-an-email"`
+   * was stored, forwarded and answered 200 - a lead nobody can reply to, filed
+   * under a category no Zap branch matches.
+   *
+   * The requirements live in `worker/src/limits.ts` and the widget's schema is
+   * built from the same table. A field that is required in one place and
+   * optional in the other is the divergence that accepts a submission in the
+   * form and then drops it at the server.
+   */
+  it.each(INQUIRY_TYPES)("accepts a complete %s submission", async (type) => {
+    interceptZapier();
+
+    const response = await postForm(completeSubmission(type));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+  });
+
+  const REMOVALS: [string, string][] = INQUIRY_TYPES.flatMap((type) =>
+    (requiredTextFieldsFor(type) ?? []).map(
+      (field) => [type, field] as [string, string],
+    ),
+  );
+
+  it.each(REMOVALS)(
+    "refuses a %s submission with %s removed",
+    async (type, field) => {
+      const form = completeSubmission(type);
+      form.delete(field);
+
+      const response = await postForm(form);
+
+      expect(response.status).toBe(400);
+      await expect(errorCodeOf(response)).resolves.toBe("INVALID_SUBMISSION");
+    },
+  );
+
+  it.each(["Bogus", "", "submit resume", "SUBMIT RESUME"])(
+    "refuses the unknown inquiry type %p",
+    async (type) => {
+      const form = completeSubmission("Consulting");
+      form.set("inquiryType", type);
+
+      const response = await postForm(form);
+
+      expect(response.status).toBe(400);
+      await expect(errorCodeOf(response)).resolves.toBe("INVALID_SUBMISSION");
+    },
+  );
+
+  /**
+   * Surrounding whitespace is trimmed rather than rejected. The discriminator
+   * has to match a Zap branch exactly, but a stray space arriving from a
+   * copy-paste is not a reason to throw a real lead away.
+   */
+  it("accepts an inquiry type carrying surrounding whitespace", async () => {
+    interceptZapier();
+    const form = completeSubmission("Consulting");
+    form.set("inquiryType", "  Consulting  ");
+
+    const response = await postForm(form);
+
+    expect(response.status).toBe(200);
+  });
+
+  it.each(["not-an-email", "jane.doe@", "@example.com", "jane doe@x.com", "jane@example"])(
+    "refuses the unusable work email %p",
+    async (email) => {
+      const form = completeSubmission("General Question");
+      form.set("workEmail", email);
+
+      const response = await postForm(form);
+
+      expect(response.status).toBe(400);
+      await expect(errorCodeOf(response)).resolves.toBe("INVALID_SUBMISSION");
+    },
+  );
+
+  /**
+   * The rejection tests above are all satisfied by an implementation that
+   * refuses everything, so the accepted set is asserted too - and deliberately
+   * includes the shapes a stricter regex would wrongly throw away. Refusing a
+   * real candidate is the failure mode this project is named after.
+   */
+  it.each([
+    "jane.doe@example.com",
+    "jane+tag@example.co.uk",
+    "j@sub.domain.example.com",
+    "jane_doe-99@example-corp.com",
+    "JANE.DOE@EXAMPLE.COM",
+  ])("accepts the deliverable work email %p", async (email) => {
+    interceptZapier();
+    const form = completeSubmission("General Question");
+    form.set("workEmail", email);
+
+    const response = await postForm(form);
+
+    expect(response.status).toBe(200);
   });
 });
 

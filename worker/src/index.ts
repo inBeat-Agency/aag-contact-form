@@ -18,9 +18,11 @@ import { toZapierPayload, type ZapierPayload } from "./payload";
 import {
   hasAllowedResumeExtension,
   hasAllowedResumeMagicBytes,
+  hasEmailShape,
   isAllowedResumeMimeType,
   MAX_RESUME_BYTES,
   MAX_SUBMISSION_BODY_BYTES,
+  requiredTextFieldsFor,
   RESUME_MAGIC_BYTE_LENGTH,
 } from "./limits";
 
@@ -118,20 +120,38 @@ function misconfiguredBinding(env: Env): ErrorCode | null {
   return null;
 }
 
-/** Text fields every inquiry type must carry, whatever else it sends. */
-const REQUIRED_TEXT_FIELDS = [
-  "inquiryType",
-  "firstName",
-  "lastName",
-  "workEmail",
-  "message",
-] as const;
-
 const RESUME_INQUIRY_TYPE = "Submit Resume";
 
 function readText(formData: FormData, key: string): string {
   const value = formData.get(key);
   return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * Authoritative field validation, driven by the shared contract.
+ *
+ * This used to check five common fields for non-emptiness and stop, which meant
+ * `inquiryType: "Bogus"` with `workEmail: "not-an-email"` was stored, forwarded
+ * and answered 200: a lead nobody can reply to, filed under a category no Zap
+ * branch matches. Neither the discriminator nor the per-type requirements were
+ * enforced anywhere except the browser, and the browser is skippable.
+ *
+ * The requirements come from `./limits`, which the widget's schema is also built
+ * from, so a field cannot be mandatory on one side and optional on the other.
+ */
+function validateFields(formData: FormData): ErrorCode | null {
+  const required = requiredTextFieldsFor(readText(formData, "inquiryType"));
+  if (required === null) return "INVALID_SUBMISSION";
+
+  for (const field of required) {
+    if (readText(formData, field) === "") return "INVALID_SUBMISSION";
+  }
+
+  if (!hasEmailShape(readText(formData, "workEmail"))) {
+    return "INVALID_SUBMISSION";
+  }
+
+  return null;
 }
 
 /**
@@ -345,11 +365,8 @@ async function handleSubmit(request: Request, env: Env): Promise<Routed> {
     return fail("INVALID_SUBMISSION", cors);
   }
 
-  for (const field of REQUIRED_TEXT_FIELDS) {
-    if (readText(formData, field) === "") {
-      return fail("INVALID_SUBMISSION", cors);
-    }
-  }
+  const invalidFields = validateFields(formData);
+  if (invalidFields !== null) return fail(invalidFields, cors);
 
   const resume = formData.get("resume");
   const file = resume instanceof File && resume.size > 0 ? resume : null;

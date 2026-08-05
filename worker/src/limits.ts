@@ -1,5 +1,5 @@
 /**
- * Resume constraints, shared by the widget and the Worker.
+ * Submission constraints, shared by the widget and the Worker.
  *
  * This module is the single source of truth for both sides. It lives under
  * `worker/` because the Worker's copy is the AUTHORITATIVE one — the widget's
@@ -23,6 +23,86 @@
  * gated at the hostname edge. Do not let a green check here become the reason
  * someone relaxes either of those.
  */
+
+/**
+ * The inquiry types the form offers, and the discriminator the payload carries.
+ *
+ * This list is the SOURCE, and `src/schema.ts` re-exports it. Defining it in
+ * both places is how the server ends up accepting a category no Zap branch
+ * matches: an unrecognised discriminator used to sail through server-side
+ * validation, be stored, be forwarded, and be answered 200.
+ */
+export const INQUIRY_TYPES = [
+  "Recruitment / Hiring",
+  "Consulting",
+  "General Question",
+  "Submit Resume",
+] as const;
+
+export type InquiryType = (typeof INQUIRY_TYPES)[number];
+
+/** Text fields every inquiry type must carry. */
+const COMMON_REQUIRED_TEXT_FIELDS = [
+  "firstName",
+  "lastName",
+  "workEmail",
+  "message",
+] as const;
+
+/**
+ * Text fields a given inquiry type requires ON TOP of the common set.
+ *
+ * Consulting and Recruitment are engagements from a company, so the person's
+ * title and employer are load-bearing for triage. Submit Resume deliberately
+ * asks a candidate for neither - they apply as an individual - and its extra
+ * requirement is the file itself, which is enforced separately because it is
+ * not a text field.
+ */
+const ADDITIONAL_REQUIRED_TEXT_FIELDS: Record<InquiryType, readonly string[]> = {
+  "Recruitment / Hiring": ["title", "company"],
+  Consulting: ["title", "company"],
+  "General Question": [],
+  "Submit Resume": [],
+};
+
+export function isInquiryType(value: string): value is InquiryType {
+  return (INQUIRY_TYPES as readonly string[]).includes(value);
+}
+
+/**
+ * Every text field this inquiry type must carry, or `null` when the type itself
+ * is not one we offer.
+ *
+ * `null` rather than an empty array on purpose: an unknown discriminator is a
+ * rejection, and returning `[]` would make it indistinguishable from a type
+ * that happens to require nothing extra.
+ */
+export function requiredTextFieldsFor(
+  inquiryType: string,
+): readonly string[] | null {
+  if (!isInquiryType(inquiryType)) return null;
+  return [
+    ...COMMON_REQUIRED_TEXT_FIELDS,
+    ...ADDITIONAL_REQUIRED_TEXT_FIELDS[inquiryType],
+  ];
+}
+
+/**
+ * A deliberately PERMISSIVE check that an address could be delivered to.
+ *
+ * This is intentionally looser than the widget's zod `.email()`, and the
+ * direction matters: everything the form accepts, the server must accept too.
+ * A server-side rule stricter than the client's produces the worst outcome this
+ * project has - a candidate whose address passed validation in the browser,
+ * whose submission was then refused, and who is never told why in terms they
+ * can act on. `src/schema.test.ts` asserts that containment directly.
+ *
+ * So this rejects only what cannot possibly be routed: no `@`, nothing before
+ * or after it, no dot in the domain, or whitespace anywhere.
+ */
+export function hasEmailShape(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
 
 /** Maximum accepted resume size, in bytes. */
 export const MAX_RESUME_BYTES = 10 * 1024 * 1024; // 10MB
