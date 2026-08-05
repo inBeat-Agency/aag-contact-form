@@ -628,7 +628,9 @@ type MandatoryBinding =
 function envWithout(binding: MandatoryBinding): typeof env {
   const clone = { ...env } as Record<string, unknown>;
   delete clone[binding];
-  return clone as typeof env;
+  // Through `unknown` deliberately: the whole point is an env that is NOT a
+  // complete ProvidedEnv, which is exactly what an unset secret produces.
+  return clone as unknown as typeof env;
 }
 
 describe("POST /submit - a misconfigured deploy fails loudly, before any side effect", () => {
