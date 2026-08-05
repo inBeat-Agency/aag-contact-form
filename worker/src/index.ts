@@ -34,6 +34,7 @@ import {
 export interface Env {
   RESUMES: R2Bucket;
   ALLOWED_ORIGIN: string;
+  RESUME_HOST: string;
   RESUME_URL_BASE: string;
   ZAPIER_HOOK_URL: string;
   ZAPIER_SHARED_SECRET: string;
@@ -459,6 +460,50 @@ async function handleSubmit(request: Request, env: Env): Promise<Routed> {
   };
 }
 
+const RESUME_PATH_PREFIX = "/resume/";
+
+/**
+ * Is this request arriving on the one hostname the Access application covers?
+ *
+ * THIS COMPARISON IS THE ONLY THING STANDING BETWEEN A STRANGER AND A CANDIDATE'S
+ * CV, and it is worth being explicit about why.
+ *
+ * Authorization deliberately lives at the edge, not in this file: Cloudflare
+ * Access challenges the request before the isolate ever runs. But Access is bound
+ * to ONE hostname, while every other name that routes to this Worker - the submit
+ * host, `*.workers.dev`, a preview URL, `wrangler dev --remote` - reaches the
+ * same code with no gate in front of it. Without this check,
+ * `<submit-host>/resume/<key>` streams PII to anyone who asks.
+ *
+ * An unset or blank binding matches NOTHING. An unconfigured deploy serving CVs
+ * from every hostname is the failure mode; answering 404 everywhere is merely a
+ * broken feature, and a broken feature is loud.
+ *
+ * The comparison is against configuration, never a literal: the AAG domain
+ * migration is still pending and must not require a source change.
+ */
+function isResumeHost(env: Env, url: URL): boolean {
+  const configured = (env.RESUME_HOST ?? "").trim().toLowerCase();
+  if (configured === "") return false;
+  return url.hostname.toLowerCase() === configured;
+}
+
+/**
+ * Stream a stored resume to an already-authenticated staff member.
+ *
+ * The 404 for a missing object is the SAME fixed 404 a wrong host gets, and that
+ * is intentional: the response must not tell a caller whether a key exists.
+ */
+async function handleResumeDownload(key: string, env: Env): Promise<Routed> {
+  const object = await env.RESUMES.get(key);
+  if (object === null) return fail("NOT_FOUND");
+
+  return {
+    response: new Response(object.body, { status: 200 }),
+    errorCode: null,
+  };
+}
+
 async function route(
   request: Request,
   env: Env,
@@ -482,9 +527,20 @@ async function route(
     }
   }
 
-  // Everything else, including /resume until its slice ships. A 404 here is
-  // the guarantee that the resume hostname cannot serve bytes before its
-  // Access gate exists.
+  // The host lock lives INSIDE this branch on purpose. Hoisting it into a
+  // top-level guard would host-lock `/submit` too, and a submit host that stops
+  // accepting posts is 100% lead loss - the failure this whole change exists to
+  // eliminate. `/submit` is public by design, so locking it buys no security
+  // and only adds a way to lose leads. The asymmetry is the design.
+  if (
+    request.method === "GET" &&
+    url.pathname.startsWith(RESUME_PATH_PREFIX) &&
+    isResumeHost(env, url)
+  ) {
+    const key = url.pathname.slice(RESUME_PATH_PREFIX.length);
+    if (key !== "") return handleResumeDownload(key, env);
+  }
+
   return fail("NOT_FOUND");
 }
 

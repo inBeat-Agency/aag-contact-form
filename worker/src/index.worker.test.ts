@@ -39,6 +39,7 @@ declare module "cloudflare:test" {
   interface ProvidedEnv {
     RESUMES: R2Bucket;
     ALLOWED_ORIGIN: string;
+    RESUME_HOST: string;
     RESUME_URL_BASE: string;
     ZAPIER_HOOK_URL: string;
     ZAPIER_SHARED_SECRET: string;
@@ -1643,6 +1644,194 @@ describe("POST /submit - a redirected hook is a FAILED forward, never a success"
   });
 });
 
+/**
+ * A key that exists in the simulated bucket for the whole retrieval block.
+ *
+ * Every wrong-host and misconfiguration test below asks for THIS key, the one
+ * proven retrievable on the configured host. A 404 is therefore attributable to
+ * the host lock and to nothing else - asking for a key that does not exist would
+ * produce the same 404 with the lock deleted.
+ */
+const STORED_RESUME_KEY = "9c1f0f7a-6c1e-4a2b-9d33-2f5b7c8e1a04";
+
+/** Real leading bytes plus a marker no other fixture in this file contains. */
+const STORED_RESUME_BYTES = new Uint8Array([
+  0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0xde, 0xad, 0xbe, 0xef, 0x0a,
+]);
+
+const STORED_RESUME_TYPE = "application/pdf";
+const STORED_RESUME_FILE_NAME = "Jane-Doe-CV.pdf";
+
+async function seedResume(
+  key: string,
+  fileName: string = STORED_RESUME_FILE_NAME,
+  contentType: string = STORED_RESUME_TYPE,
+): Promise<void> {
+  await env.RESUMES.put(key, STORED_RESUME_BYTES, {
+    httpMetadata: { contentType },
+    customMetadata: {
+      originalFileName: fileName,
+      submittedAt: "2026-08-05T00:00:00.000Z",
+      submissionId: key,
+      subjectHash: "0".repeat(64),
+    },
+  });
+}
+
+function resumeUrl(host: string, key: string): string {
+  return `https://${host}/resume/${key}`;
+}
+
+async function bodyBytesOf(response: Response): Promise<number[]> {
+  return [...new Uint8Array(await response.arrayBuffer())];
+}
+
+describe("GET /resume — route reachability (NOT authorization; Access is edge-side and invisible to Miniflare)", () => {
+  // These tests prove the ROUTE works. They prove NOTHING about the gate.
+  // Authorization is verified only by deploy probe P2 (§3 D-I). A green run
+  // here is fully consistent with the Access app never having been created.
+
+  beforeAll(async () => {
+    await seedResume(STORED_RESUME_KEY);
+  });
+
+  it("streams the stored bytes on the configured resume host", async () => {
+    const response = await SELF.fetch(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(bodyBytesOf(response)).resolves.toEqual([
+      ...STORED_RESUME_BYTES,
+    ]);
+  });
+
+  /**
+   * THE LOAD-BEARING TEST OF THIS SLICE.
+   *
+   * Cloudflare Access is bound to ONE hostname. The submit host resolves to the
+   * same Worker, so without this comparison `<submit-host>/resume/<key>` serves
+   * candidate CVs with no gate in front of them at all - the Access app is on
+   * the other name and never sees the request.
+   *
+   * The key asked for here is the one the test above just proved retrievable, so
+   * the 404 can only come from the host check.
+   */
+  it("answers 404 NOT_FOUND for a retrievable key on a host that is not the configured one", async () => {
+    const response = await SELF.fetch(resumeUrl("worker.test", STORED_RESUME_KEY));
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "NOT_FOUND",
+    });
+  });
+
+  /**
+   * The lock must follow the BINDING, not a literal typed into the source. A
+   * hardcoded hostname would keep the two tests above green while making the
+   * pending domain migration a code change - which the spec forbids.
+   */
+  it("locks onto whatever RESUME_HOST is bound to, not a hostname in source", async () => {
+    const ctx = createExecutionContext();
+    const served = await worker.fetch(
+      new Request(resumeUrl("alternate-resume.test", STORED_RESUME_KEY)),
+      { ...env, RESUME_HOST: "alternate-resume.test" },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(served.status).toBe(200);
+    await expect(bodyBytesOf(served)).resolves.toEqual([...STORED_RESUME_BYTES]);
+
+    const refused = await SELF.fetch(
+      resumeUrl("alternate-resume.test", STORED_RESUME_KEY),
+    );
+    expect(refused.status).toBe(404);
+  });
+
+  /**
+   * Fail closed. An unset RESUME_HOST is an unconfigured deploy, and an
+   * unconfigured deploy must not serve PII from every hostname that reaches this
+   * Worker - including `*.workers.dev` and preview URLs, which no Access app
+   * covers.
+   */
+  it("serves nothing anywhere when RESUME_HOST is unset", async () => {
+    for (const host of ["worker.test", "resume-host.test", "anything.test"]) {
+      const ctx = createExecutionContext();
+      const response = await worker.fetch(
+        new Request(resumeUrl(host, STORED_RESUME_KEY)),
+        { ...env, RESUME_HOST: "" },
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+
+      expect(response.status).toBe(404);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: "NOT_FOUND",
+      });
+    }
+  });
+
+  it("answers 404 NOT_FOUND for an unknown key on the configured host", async () => {
+    const response = await SELF.fetch(
+      resumeUrl(env.RESUME_HOST, "00000000-0000-4000-8000-000000000000"),
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "NOT_FOUND",
+    });
+  });
+
+  it("answers 404 NOT_FOUND when no key follows /resume/", async () => {
+    for (const path of ["/resume", "/resume/"]) {
+      const response = await SELF.fetch(`https://${env.RESUME_HOST}${path}`);
+
+      expect(response.status).toBe(404);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: "NOT_FOUND",
+      });
+    }
+  });
+
+  it("answers 404 NOT_FOUND to a non-GET method on the configured host", async () => {
+    for (const method of ["POST", "PUT", "DELETE", "OPTIONS"]) {
+      const response = await SELF.fetch(
+        resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+        { method },
+      );
+
+      expect(response.status).toBe(404);
+    }
+  });
+
+  /**
+   * THE ASYMMETRY IS DELIBERATE, so it gets its own assertion.
+   *
+   * `/submit` is NOT host-locked. Locking it buys no security - the endpoint is
+   * public by design - and every hostname that stops accepting submissions is
+   * 100% lead loss, the exact failure this whole change exists to eliminate.
+   */
+  it("keeps /submit answering on a host that is not the resume host", async () => {
+    interceptZapier();
+
+    const response = await SELF.fetch("https://some-other-host.test/submit", {
+      method: "POST",
+      body: resumeSubmission(),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      resumeUrl: expect.stringMatching(/^https:\/\/resume\.test\/resume\/[0-9a-f-]{36}$/),
+    });
+  });
+});
+
 describe("routing", () => {
   it("answers an unknown path with 404 NOT_FOUND from the fixed enum", async () => {
     const response = await SELF.fetch(`${ORIGIN}/definitely-not-a-route`);
@@ -1664,22 +1853,8 @@ describe("routing", () => {
     });
   });
 
-  /**
-   * Ordering guarantee from the rollout plan (W3): the resume hostname is
-   * pointed at this Worker and the Cloudflare Access app is created BEFORE any
-   * `/resume` handler exists. Until then the route must answer 404, so the
-   * hostname can never serve CV bytes before its gate exists. This test is what
-   * keeps that window closed while S2 is in flight.
-   */
-  it("answers GET /resume/<key> with 404 - no handler ships in this slice", async () => {
-    const response = await SELF.fetch(
-      `${ORIGIN}/resume/11111111-2222-4333-8444-555555555555`,
-    );
-
-    expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toEqual({
-      ok: false,
-      error: "NOT_FOUND",
-    });
-  });
+  // `/resume` is deliberately NOT covered here. It now has a handler, and its
+  // reachability, host lock and response contract live in the labelled
+  // "route reachability (NOT authorization...)" block above, where a reader
+  // cannot mistake a green run for a proof that the Access gate exists.
 });

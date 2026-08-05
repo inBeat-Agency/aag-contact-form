@@ -44,6 +44,21 @@ ALLOWED_ORIGIN = "https://alpha-apex-group.webflow.io"
 # points nowhere.
 RESUME_URL_BASE = ""
 
+# The ONE hostname `GET /resume/<key>` will answer on, and the same hostname the
+# Cloudflare Access application must be scoped to.
+#
+# Access gates a hostname, not a Worker. Every other name that routes here - the
+# submit host, workers.dev, a preview URL - would otherwise serve candidate CVs
+# with no gate in front of them, because the Access app is on the other name and
+# never sees the request. The Worker compares this value and answers 404 to
+# everything else.
+#
+# BLANK ON PURPOSE, and blank means "serve no resume anywhere". The zone is still
+# undecided (design open questions), and an unconfigured deploy that streams PII
+# from every hostname is far worse than one whose download route is simply dead.
+# Set it at deploy time, in the same step that creates the Access app (W3).
+RESUME_HOST = ""
+
 # ZAPIER_HOOK_URL, ZAPIER_SHARED_SECRET and ERASURE_SALT are Worker SECRETS.
 # They are intentionally absent from this file. Tests inject fakes through
 # vitest.worker.config.ts.

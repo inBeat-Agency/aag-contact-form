@@ -32,6 +32,9 @@ export default defineWorkersConfig({
           // secret-hygiene test asserts none of them reaches a log line.
           bindings: {
             ALLOWED_ORIGIN: "https://widget.test",
+            // Deliberately NOT the host the suite posts submissions to. The
+            // /resume host lock is only observable when the two differ.
+            RESUME_HOST: "resume-host.test",
             RESUME_URL_BASE: "https://resume.test/resume",
             ZAPIER_HOOK_URL: "https://hooks.test/catch/1/abcdef",
             ZAPIER_SHARED_SECRET: "test-shared-secret-4f2a9c",
