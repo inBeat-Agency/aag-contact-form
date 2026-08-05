@@ -1,0 +1,39 @@
+# Cloudflare Worker config for the contact-form submit/resume endpoints.
+#
+# This is a SECOND, separate config. The repo root `wrangler.toml` configures the
+# existing Cloudflare Pages project and must not be merged with this one.
+#
+# `workers_dev = true` and NO `routes`/`route` block: the custom hostname has not
+# been decided yet (design D6, open question). Hostnames are configuration, never
+# source literals — the resume URL is built from the RESUME_URL_BASE var below,
+# so repointing a domain is a config edit and not a code change.
+
+name = "aag-contact-form-worker"
+main = "src/index.ts"
+compatibility_date = "2026-07-23"
+
+workers_dev = true
+
+# Private bucket. Public access (the r2.dev URL and any connected custom domain)
+# is a dashboard toggle that is invisible to this file and is asserted separately
+# by the S3 preflight script.
+[[r2_buckets]]
+binding = "RESUMES"
+bucket_name = "aag-resumes"
+
+[vars]
+# Origin allowed to read a /submit response. A mismatch still DELIVERS the lead
+# (multipart is CORS-safelisted, so no preflight fires) but hides the response
+# from the page, producing duplicate submissions and a false failure report.
+# Must be asserted against the live document origin at cutover.
+ALLOWED_ORIGIN = "https://alpha-apex-group.webflow.io"
+
+# Base for the resume URL handed to Zapier. Set at deploy time to the resume
+# hostname. There is deliberately no source-level fallback: if this is missing
+# the Worker fails the request loudly instead of forwarding a lead whose CV link
+# points nowhere.
+RESUME_URL_BASE = ""
+
+# ZAPIER_HOOK_URL, ZAPIER_SHARED_SECRET and ERASURE_SALT are Worker SECRETS.
+# They are intentionally absent from this file. Tests inject fakes through
+# vitest.worker.config.ts.

@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
@@ -16,5 +16,10 @@ export default defineConfig({
       "src/**/*.test.tsx",
       "worker/**/*.test.ts",
     ],
+    // `*.worker.test.ts` also ends in `.test.ts`, so the include above would
+    // otherwise sweep it in. Those files must run in workerd, not jsdom —
+    // `vitest.worker.config.ts` owns them. Spreading the defaults matters:
+    // setting `exclude` replaces node_modules/dist rather than adding to them.
+    exclude: [...configDefaults.exclude, "worker/**/*.worker.test.ts"],
   },
 });

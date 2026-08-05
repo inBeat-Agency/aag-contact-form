@@ -4,7 +4,16 @@
     // DOM supplies FormData/File (the Worker runtime provides both); node types
     // cover the fixture reads in the contract test and the manual replay script.
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["node"],
+    // `node` covers the fixture reads in the contract test and the replay
+    // script; the Cloudflare entries supply the Workers runtime globals
+    // (R2Bucket, ExecutionContext) and the `cloudflare:test` module used by the
+    // runtime suite. `skipLibCheck` above absorbs the known DOM/workers-types
+    // overlap on Request/Response/FormData.
+    "types": [
+      "node",
+      "@cloudflare/workers-types/experimental",
+      "@cloudflare/vitest-pool-workers"
+    ],
     "module": "ESNext",
     "skipLibCheck": true,
 
