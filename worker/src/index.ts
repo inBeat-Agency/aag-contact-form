@@ -488,6 +488,59 @@ function isResumeHost(env: Env, url: URL): boolean {
   return url.hostname.toLowerCase() === configured;
 }
 
+/** Used when the stored name is absent or sanitises away to nothing. */
+const FALLBACK_RESUME_FILE_NAME = "resume";
+
+/**
+ * Make a candidate-supplied filename safe to place inside a response header.
+ *
+ * The name travels from an upload straight into `Content-Disposition`, so it is
+ * attacker-controlled input in a header value. A CR or LF splits the header
+ * block and lets the uploader dictate headers - or an entire second response -
+ * to the staff browser downloading the file. A bare quote closes the
+ * quoted-string early and does the same to its parameters, and a backslash is
+ * the escape character inside one.
+ *
+ * They are STRIPPED rather than escaped: a resume filename has no legitimate use
+ * for any of them, and deleting a character cannot be got wrong the way an
+ * escaping scheme can.
+ */
+function sanitizeFileName(name: string): string {
+  const stripped = name.replace(/[\r\n"\\]/g, "").trim();
+  return stripped === "" ? FALLBACK_RESUME_FILE_NAME : stripped;
+}
+
+/**
+ * Response headers for a resume download (D-L).
+ *
+ * A CV is an attacker-supplied binary served on the SAME ORIGIN whose session is
+ * the Access identity. If the browser renders it inline, a malicious PDF runs in
+ * the one origin whose cookies unlock every other candidate's file. So it is
+ * never a page: `attachment` forces a download, `nosniff` stops the browser
+ * second-guessing the stored type back into something renderable, and the CSP
+ * sandbox leaves anything that does execute with no origin and no privileges.
+ * `no-referrer` keeps the key out of outbound headers and `no-store` keeps the
+ * bytes off shared disks.
+ *
+ * THERE IS DELIBERATELY NO `Access-Control-Allow-Origin` HERE, AT ANY STATUS
+ * (W6). CORS belongs to `/submit` alone. Adding it would let any page in a
+ * staff member's browser read a candidate's CV using that staff member's own
+ * Access session.
+ */
+function resumeDownloadHeaders(
+  contentType: string,
+  fileName: string,
+): Record<string, string> {
+  return {
+    "Content-Type": contentType,
+    "Content-Disposition": `attachment; filename="${sanitizeFileName(fileName)}"`,
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "private, no-store",
+  };
+}
+
 /**
  * Stream a stored resume to an already-authenticated staff member.
  *
@@ -499,7 +552,13 @@ async function handleResumeDownload(key: string, env: Env): Promise<Routed> {
   if (object === null) return fail("NOT_FOUND");
 
   return {
-    response: new Response(object.body, { status: 200 }),
+    response: new Response(object.body, {
+      status: 200,
+      headers: resumeDownloadHeaders(
+        object.httpMetadata?.contentType ?? "application/octet-stream",
+        object.customMetadata?.originalFileName ?? "",
+      ),
+    }),
     errorCode: null,
   };
 }

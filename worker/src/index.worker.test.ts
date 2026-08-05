@@ -1686,6 +1686,38 @@ async function bodyBytesOf(response: Response): Promise<number[]> {
   return [...new Uint8Array(await response.arrayBuffer())];
 }
 
+type ProbedResume = {
+  status: number;
+  headerNames: string[];
+  header: (name: string) => string | null;
+  bytes: number[];
+};
+
+/**
+ * Fetch a resume and DRAIN THE BODY BEFORE ANY ASSERTION RUNS.
+ *
+ * A 200 from `/resume` carries a live R2 stream. Leaving it unread when an
+ * expectation fails makes Miniflare abort the whole file with "Failed to pop
+ * isolated storage stack frame" - which buries the assertion diff that was
+ * about to tell you what actually broke. Draining up front means a red test
+ * reports itself instead of taking the run down with it.
+ */
+async function probeResume(
+  url: string,
+  init?: RequestInit,
+): Promise<ProbedResume> {
+  const response = await SELF.fetch(url, init);
+  const bytes = [...new Uint8Array(await response.arrayBuffer())];
+  return {
+    status: response.status,
+    headerNames: [...response.headers.keys()]
+      .map((name) => name.toLowerCase())
+      .sort(),
+    header: (name: string) => response.headers.get(name),
+    bytes,
+  };
+}
+
 describe("GET /resume — route reachability (NOT authorization; Access is edge-side and invisible to Miniflare)", () => {
   // These tests prove the ROUTE works. They prove NOTHING about the gate.
   // Authorization is verified only by deploy probe P2 (§3 D-I). A green run
@@ -1816,6 +1848,162 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
    * public by design - and every hostname that stops accepting submissions is
    * 100% lead loss, the exact failure this whole change exists to eliminate.
    */
+  /**
+   * THE COMPLETE HEADER SET, ASSERTED AS A SET.
+   *
+   * Member-by-member assertions are why a prior metadata guard stayed 112/115
+   * green while raw candidate email was being written to every object: checking
+   * that the things you expect are present says nothing about what ELSE is. Here
+   * an accidental `Access-Control-Allow-Origin` - the W6 failure that would make
+   * a candidate's CV readable cross-origin using a staff member's own Access
+   * session - has to turn this red, and only an exact set does that.
+   *
+   * These are exactly the five D-L hardening headers plus the stored content
+   * type, and nothing else. The Worker streams the object without declaring a
+   * length, so no transport header joins them.
+   */
+  const RESUME_200_HEADERS = [
+    "cache-control",
+    "content-disposition",
+    "content-security-policy",
+    "content-type",
+    "referrer-policy",
+    "x-content-type-options",
+  ];
+
+  const RESUME_404_HEADERS = ["content-type"];
+
+  it("pins the complete header set of a successful download", async () => {
+    const download = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+    );
+
+    expect(download.status).toBe(200);
+    expect(download.headerNames).toEqual(RESUME_200_HEADERS);
+  });
+
+  /**
+   * D-L. A CV is an attacker-supplied binary served on the origin whose sessions
+   * ARE the Access identity. A malicious PDF that renders inline runs in that
+   * origin. Every one of these is what keeps it a download instead of a page.
+   */
+  it("hardens every successful download against being rendered inline", async () => {
+    const download = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+    );
+
+    expect(download.header("X-Content-Type-Options")).toBe("nosniff");
+    expect(download.header("Content-Security-Policy")).toBe(
+      "default-src 'none'; sandbox",
+    );
+    expect(download.header("Referrer-Policy")).toBe("no-referrer");
+    expect(download.header("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("serves the download with the content type it was stored under", async () => {
+    const docxKey = "3a7d2e10-88b4-4c6f-b1a2-77c9e0d4f5b6";
+    const docxType =
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    await seedResume(docxKey, "Jane-Doe-CV.docx", docxType);
+
+    const download = await probeResume(resumeUrl(env.RESUME_HOST, docxKey));
+
+    expect(download.header("Content-Type")).toBe(docxType);
+  });
+
+  it("offers the stored original filename as an attachment", async () => {
+    const download = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+    );
+
+    expect(download.header("Content-Disposition")).toBe(
+      `attachment; filename="${STORED_RESUME_FILE_NAME}"`,
+    );
+  });
+
+  /**
+   * HEADER INJECTION. The filename is candidate-supplied and travels into a
+   * response header verbatim. A CR/LF in it splits the header block and lets the
+   * uploader dictate headers - or a whole second response - to the staff browser
+   * that downloads the file. A bare quote closes the quoted-string early and
+   * does the same with parameters.
+   */
+  it("strips CR, LF, quotes and backslashes out of the stored filename", async () => {
+    const hostileKey = "c4e8b6a2-5d31-4f88-9a70-1b2c3d4e5f60";
+    await seedResume(
+      hostileKey,
+      'ev"il\r\nX-Injected: yes\r\n\r\n<script>alert(1)</script>\\cv.pdf',
+    );
+
+    const download = await probeResume(resumeUrl(env.RESUME_HOST, hostileKey));
+
+    expect(download.header("Content-Disposition")).toBe(
+      'attachment; filename="evilX-Injected: yes<script>alert(1)</script>cv.pdf"',
+    );
+    expect(download.header("X-Injected")).toBeNull();
+    expect(download.headerNames).toEqual(RESUME_200_HEADERS);
+  });
+
+  it("still names the attachment when the stored filename is missing or sanitises away", async () => {
+    const namelessKey = "d5f9c7b3-6e42-4099-8b81-2c3d4e5f6071";
+    await env.RESUMES.put(namelessKey, STORED_RESUME_BYTES, {
+      httpMetadata: { contentType: STORED_RESUME_TYPE },
+      customMetadata: { submittedAt: "2026-08-05T00:00:00.000Z" },
+    });
+
+    const strippedKey = "e6a0d8c4-7f53-4100-9c92-3d4e5f607182";
+    await seedResume(strippedKey, '"""');
+
+    for (const key of [namelessKey, strippedKey]) {
+      const download = await probeResume(resumeUrl(env.RESUME_HOST, key));
+
+      expect(download.status).toBe(200);
+      expect(download.header("Content-Disposition")).toBe(
+        'attachment; filename="resume"',
+      );
+    }
+  });
+
+  /**
+   * W6, stated as its own test because it is a rule about the whole route rather
+   * than about one response. CORS belongs to `/submit` and nowhere else.
+   */
+  it("emits no Access-Control-Allow-Origin on any /resume response", async () => {
+    const probes = [
+      await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY)),
+      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY)),
+      await probeResume(
+        resumeUrl(env.RESUME_HOST, "00000000-0000-4000-8000-000000000000"),
+      ),
+      await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), {
+        method: "POST",
+      }),
+    ];
+
+    for (const probe of probes) {
+      expect(probe.header("Access-Control-Allow-Origin")).toBeNull();
+    }
+
+    // Proves the loop above actually covered a success AND the failure paths,
+    // rather than four responses that were all refused before any header ran.
+    expect(probes.map((probe) => probe.status)).toEqual([200, 404, 404, 404]);
+  });
+
+  it("pins the complete header set of every /resume 404", async () => {
+    const refusals = [
+      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY)),
+      await probeResume(
+        resumeUrl(env.RESUME_HOST, "00000000-0000-4000-8000-000000000000"),
+      ),
+      await probeResume(`https://${env.RESUME_HOST}/resume/`),
+    ];
+
+    for (const refusal of refusals) {
+      expect(refusal.status).toBe(404);
+      expect(refusal.headerNames).toEqual(RESUME_404_HEADERS);
+    }
+  });
+
   it("keeps /submit answering on a host that is not the resume host", async () => {
     interceptZapier();
 
