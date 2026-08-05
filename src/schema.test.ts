@@ -11,8 +11,12 @@ import {
   ALLOWED_RESUME_EXTENSIONS as SHARED_ALLOWED_RESUME_EXTENSIONS,
   hasEmailShape,
   INQUIRY_TYPES as SHARED_INQUIRY_TYPES,
+  MAX_FILE_NAME_BYTES,
   MAX_RESUME_BYTES as SHARED_MAX_RESUME_BYTES,
+  MAX_TEXT_FIELD_BYTES,
+  MAX_TEXT_FIELD_CHARS,
   requiredTextFieldsFor,
+  utf8ByteLength,
 } from "../worker/src/limits";
 
 // Helper to fabricate a File of a given size/type without allocating real bytes.
@@ -379,4 +383,77 @@ describe("widget and Worker cannot diverge on the submission contract", () => {
       expect(hasEmailShape(email)).toBe(false);
     },
   );
+});
+
+/**
+ * The request-size ceiling the Worker uses is derived from these limits, so if
+ * the form does not enforce them the ceiling is not a bound and a legitimate
+ * submission can be refused before it is even parsed.
+ */
+describe("text limits hold on the widget side too", () => {
+  /**
+   * The heaviest character per UTF-16 code unit, which is the unit zod counts.
+   * A BMP character costs one code unit and three UTF-8 bytes; an emoji looks
+   * bigger but is a surrogate pair, so it only costs two bytes per code unit.
+   */
+  const heaviestPerCodeUnit = "\u4E2D";
+
+  it("accepts a message of exactly the shared character cap", () => {
+    const result = contactFormSchema.safeParse({
+      inquiryType: "General Question",
+      ...baseContact,
+      message: heaviestPerCodeUnit.repeat(MAX_TEXT_FIELD_CHARS),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a message one character over the shared cap", () => {
+    const result = contactFormSchema.safeParse({
+      inquiryType: "General Question",
+      ...baseContact,
+      message: heaviestPerCodeUnit.repeat(MAX_TEXT_FIELD_CHARS + 1),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  /**
+   * Containment, measured rather than reasoned: the largest value the form will
+   * accept, in its heaviest possible encoding, must still fit the byte cap the
+   * server enforces.
+   */
+  /** A string filled to exactly the cap in the unit zod counts. */
+  function atCodeUnitCap(char: string): string {
+    return char.repeat(Math.floor(MAX_TEXT_FIELD_CHARS / char.length));
+  }
+
+  it.each(["\u4E2D", "\u{1F600}", "a"])(
+    "keeps the widest accepted value built from %p inside the server's byte cap",
+    (char) => {
+      const widest = atCodeUnitCap(char);
+
+      // Genuinely at the boundary, so the byte assertion below is not passing
+      // simply because the string is short.
+      expect(widest.length).toBeGreaterThan(MAX_TEXT_FIELD_CHARS - char.length);
+      expect(widest.length).toBeLessThanOrEqual(MAX_TEXT_FIELD_CHARS);
+
+      const parsed = contactFormSchema.safeParse({
+        inquiryType: "General Question",
+        ...baseContact,
+        message: widest,
+      });
+
+      expect(parsed.success).toBe(true);
+      expect(utf8ByteLength(widest)).toBeLessThanOrEqual(MAX_TEXT_FIELD_BYTES);
+    },
+  );
+
+  it("rejects a file name longer than the server accepts", () => {
+    const name = `${"n".repeat(MAX_FILE_NAME_BYTES)}.pdf`;
+
+    expect(resumeFileSchema.safeParse(makeFile(name, "application/pdf", 1024)).success).toBe(
+      false,
+    );
+  });
 });

@@ -3,7 +3,10 @@ import { z } from "zod";
 import {
   hasAllowedResumeExtension,
   isAllowedResumeMimeType,
+  MAX_FILE_NAME_BYTES,
   MAX_RESUME_BYTES,
+  MAX_TEXT_FIELD_CHARS,
+  utf8ByteLength,
 } from "../worker/src/limits";
 
 /**
@@ -58,22 +61,39 @@ export {
 // Reusable primitives.
 // ---------------------------------------------------------------------------
 
-const requiredString = (label: string) =>
-  z
-    .string({ required_error: `${label} is required` })
-    .trim()
-    .min(1, `${label} is required`);
+/**
+ * The shared per-field length cap, expressed for the form.
+ *
+ * The Worker enforces the same limit in BYTES, and the request-size ceiling it
+ * uses is derived from it. If the form does not enforce this, that ceiling stops
+ * being a bound and a legitimate submission can be refused before it is parsed.
+ * `MAX_TEXT_FIELD_CHARS` is the byte cap divided by the widest possible UTF-8
+ * code point, so this rule is provably the stricter of the two.
+ */
+const withinLengthCap = (label: string) => (schema: z.ZodString) =>
+  schema.max(MAX_TEXT_FIELD_CHARS, `${label} is too long`);
 
-const workEmail = z
-  .string({ required_error: "Work email is required" })
-  .trim()
-  .min(1, "Work email is required")
-  .email("Enter a valid work email address");
+const requiredString = (label: string) =>
+  withinLengthCap(label)(
+    z
+      .string({ required_error: `${label} is required` })
+      .trim()
+      .min(1, `${label} is required`),
+  );
+
+const workEmail = withinLengthCap("Work email")(
+  z
+    .string({ required_error: "Work email is required" })
+    .trim()
+    .min(1, "Work email is required")
+    .email("Enter a valid work email address"),
+);
 
 // Phone is intentionally loose: optional, any non-empty free-form string is fine.
 const optionalPhone = z
   .string()
   .trim()
+  .max(MAX_TEXT_FIELD_CHARS, "Phone is too long")
   .optional()
   .transform((value) => (value === "" ? undefined : value));
 
@@ -103,6 +123,12 @@ const resumeFile = z
   })
   .refine((file) => file.size > 0, "Please upload your resume")
   .refine((file) => file.size <= MAX_RESUME_BYTES, "File must be 10MB or less")
+  // The name rides inside the multipart envelope the Worker's size ceiling
+  // accounts for, so it is bounded on both sides rather than just one.
+  .refine(
+    (file) => utf8ByteLength(file.name) <= MAX_FILE_NAME_BYTES,
+    "File name is too long",
+  )
   .refine(
     (file) =>
       hasAllowedResumeExtension(file.name) && isAllowedResumeMimeType(file.type),

@@ -20,10 +20,15 @@ import {
   hasAllowedResumeMagicBytes,
   hasEmailShape,
   isAllowedResumeMimeType,
+  MAX_FILE_NAME_BYTES,
   MAX_RESUME_BYTES,
   MAX_SUBMISSION_BODY_BYTES,
+  MAX_TEXT_FIELD_BYTES,
+  MAX_TEXT_FIELD_COUNT,
+  MAX_TEXT_PAYLOAD_BYTES,
   requiredTextFieldsFor,
   RESUME_MAGIC_BYTE_LENGTH,
+  utf8ByteLength,
 } from "./limits";
 
 export interface Env {
@@ -139,7 +144,39 @@ function readText(formData: FormData, key: string): string {
  * The requirements come from `./limits`, which the widget's schema is also built
  * from, so a field cannot be mandatory on one side and optional on the other.
  */
+/**
+ * Enforce the text limits the request ceiling is derived from.
+ *
+ * Without these the ceiling is a fiction: unbounded text meant a request could
+ * be refused as FILE_TOO_LARGE while the measured file was far under its cap.
+ * Counting entries as well as bytes is what turns the payload budget into an
+ * actual bound - a hundred small fields would otherwise slip past a per-field
+ * check and still add up to an unbounded body.
+ */
+function validateTextSize(formData: FormData): ErrorCode | null {
+  let count = 0;
+  let total = 0;
+
+  for (const [, value] of formData.entries()) {
+    if (typeof value !== "string") continue;
+
+    count += 1;
+    if (count > MAX_TEXT_FIELD_COUNT) return "INVALID_SUBMISSION";
+
+    const bytes = utf8ByteLength(value);
+    if (bytes > MAX_TEXT_FIELD_BYTES) return "INVALID_SUBMISSION";
+
+    total += bytes;
+    if (total > MAX_TEXT_PAYLOAD_BYTES) return "INVALID_SUBMISSION";
+  }
+
+  return null;
+}
+
 function validateFields(formData: FormData): ErrorCode | null {
+  const oversized = validateTextSize(formData);
+  if (oversized !== null) return oversized;
+
   const required = requiredTextFieldsFor(readText(formData, "inquiryType"));
   if (required === null) return "INVALID_SUBMISSION";
 
@@ -189,6 +226,12 @@ function declaredBodyExceedsCap(request: Request): boolean {
  */
 async function validateResume(file: File): Promise<ErrorCode | null> {
   if (file.size > MAX_RESUME_BYTES) return "FILE_TOO_LARGE";
+
+  // Bounded because the name rides inside the multipart envelope, and an
+  // unbounded envelope makes the request ceiling unprovable.
+  if (utf8ByteLength(file.name) > MAX_FILE_NAME_BYTES) {
+    return "INVALID_SUBMISSION";
+  }
 
   if (
     !hasAllowedResumeExtension(file.name) ||

@@ -108,26 +108,83 @@ export function hasEmailShape(value: string): boolean {
 export const MAX_RESUME_BYTES = 10 * 1024 * 1024; // 10MB
 
 /**
- * Headroom above {@link MAX_RESUME_BYTES} for everything that travels ALONGSIDE
- * the file: multipart boundaries, per-part headers, the original file name and
- * the text fields.
+ * Longest accepted value for a single text field, in UTF-8 BYTES.
  *
- * WHY THIS CONSTANT EXISTS. A `Content-Length` describes the whole request body,
- * not the file inside it. Comparing it directly against `MAX_RESUME_BYTES`
- * rejects an exactly-10MB resume every time, because the envelope always pushes
- * the body a little over. That is silent lead loss precisely at the documented
- * limit, which is the failure mode this project exists to remove.
+ * Text fields used to have no maximum at all, which is what made the request
+ * ceiling below a fiction: a 4-byte PDF next to a 12MB message was refused as
+ * `FILE_TOO_LARGE` even though the measured file was three orders of magnitude
+ * under its cap. A limit nobody enforces cannot be used to derive a bound.
+ */
+export const MAX_TEXT_FIELD_BYTES = 16 * 1024; // 16KB, ~4000 words of prose
+
+/**
+ * The same limit expressed in the unit ZOD actually counts: UTF-16 code units,
+ * which is what `String.length` returns.
  *
- * So the allowance is deliberately generous. The declared length is only an
- * optimization that avoids buffering an absurd body; it must never refuse
- * something that could still contain an acceptable file. The measured check on
- * the parsed file is the real gate.
+ * THE DIVISOR IS 3, NOT 4, and the reasoning is easy to get backwards. A 4-byte
+ * UTF-8 character is a surrogate pair, so it costs 2 code units and weighs only
+ * 2 bytes per unit. The true worst case is a 3-byte BMP character, which is a
+ * single code unit weighing 3 bytes.
+ *
+ * Multiplying by 3 therefore bounds the bytes of any string the widget accepts,
+ * making the widget's rule provably the STRICTER of the pair. That direction is
+ * mandatory: a server stricter than the form refuses a submission the user was
+ * already told was fine.
+ */
+export const MAX_TEXT_FIELD_CHARS = Math.floor(MAX_TEXT_FIELD_BYTES / 3);
+
+/**
+ * How many text fields a submission may carry. The widget sends thirteen; the
+ * margin is for future fields, and the cap is what makes the payload budget
+ * below an actual bound rather than an estimate.
+ */
+export const MAX_TEXT_FIELD_COUNT = 16;
+
+/** Every text field at its cap, which is the worst legal text payload. */
+export const MAX_TEXT_PAYLOAD_BYTES =
+  MAX_TEXT_FIELD_BYTES * MAX_TEXT_FIELD_COUNT;
+
+/**
+ * Longest accepted original file name, in UTF-8 bytes.
+ *
+ * The name travels inside the multipart envelope, so leaving it unbounded
+ * leaves the envelope unbounded, and the allowance below could then be
+ * exceeded by a submission that broke no other rule.
+ */
+export const MAX_FILE_NAME_BYTES = 1024;
+
+/**
+ * Headroom for the multipart envelope itself: boundaries, per-part headers and
+ * field names.
+ *
+ * A `Content-Length` describes the whole request body, not the file inside it.
+ * Comparing it directly against {@link MAX_RESUME_BYTES} rejects an
+ * exactly-10MB resume every time, because the envelope always pushes the body a
+ * little over - silent lead loss at precisely the size the UI advertises.
  */
 export const MULTIPART_ENVELOPE_ALLOWANCE_BYTES = 1024 * 1024; // 1MB
 
-/** Largest declared request body that could still hold an acceptable resume. */
+/**
+ * Largest declared request body that could still hold a LEGAL submission.
+ *
+ * DERIVED, not guessed, and every term is separately enforced: the resume is
+ * capped by measured size, the text payload by per-field and per-count limits,
+ * the file name by its own cap, and the remainder is envelope overhead. So any
+ * submission satisfying every declared rule fits underneath this number, and
+ * the pre-parse fast path can only ever reject a request that was going to be
+ * refused anyway.
+ *
+ * That property is the point, and it is asserted by measurement rather than
+ * argument: the worker suite encodes the heaviest legal submission, weighs it,
+ * and requires it to sit under this ceiling and come back 200.
+ */
 export const MAX_SUBMISSION_BODY_BYTES =
-  MAX_RESUME_BYTES + MULTIPART_ENVELOPE_ALLOWANCE_BYTES;
+  MAX_RESUME_BYTES + MAX_TEXT_PAYLOAD_BYTES + MULTIPART_ENVELOPE_ALLOWANCE_BYTES;
+
+/** UTF-8 weight of a string, which is what a request body actually carries. */
+export function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
 
 export const ALLOWED_RESUME_EXTENSIONS = [".pdf", ".doc", ".docx"] as const;
 

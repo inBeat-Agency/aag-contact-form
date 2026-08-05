@@ -16,8 +16,13 @@ import submitResume from "../fixtures/submit-resume.json";
 import worker from "./index";
 import {
   INQUIRY_TYPES,
+  MAX_FILE_NAME_BYTES,
   MAX_RESUME_BYTES,
   MAX_SUBMISSION_BODY_BYTES,
+  MAX_TEXT_FIELD_BYTES,
+  MAX_TEXT_FIELD_CHARS,
+  MAX_TEXT_FIELD_COUNT,
+  MAX_TEXT_PAYLOAD_BYTES,
   requiredTextFieldsFor,
 } from "./limits";
 import type { ZapierPayload } from "./payload";
@@ -573,6 +578,128 @@ describe("POST /submit - Content-Length is an optimization, measured size is the
     const response = await postForm(resumeSubmission(atLimit));
 
     expect(response.status).toBe(200);
+  });
+});
+
+/** 4-byte code points: the worst case a UTF-8 text field can weigh per char. */
+function maximalText(bytes: number): string {
+  return "\u{1F600}".repeat(Math.floor(bytes / 4));
+}
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+/**
+ * The heaviest submission that still satisfies every declared field and file
+ * rule: every text field at its cap, the longest permitted file name, and a
+ * resume of exactly the documented maximum.
+ */
+function maximalValidSubmission(): FormData {
+  const form = new FormData();
+  form.append("inquiryType", "Consulting");
+  for (const field of ["firstName", "lastName", "title", "company", "phone", "message"]) {
+    form.append(field, maximalText(MAX_TEXT_FIELD_BYTES));
+  }
+  const local = "a".repeat(MAX_TEXT_FIELD_BYTES - "@example.com".length);
+  form.append("workEmail", `${local}@example.com`);
+  form.append("companySize", "51-200");
+  form.append("estimatedBudget", "$50K – $150K");
+  form.append("expectedTimeline", "ASAP");
+  form.append("source", "aag-contact-form");
+  form.append("website", "");
+
+  const name = `${"n".repeat(MAX_FILE_NAME_BYTES - ".pdf".length)}.pdf`;
+  const file = makeFile(name, "application/pdf", PDF_MAGIC, MAX_RESUME_BYTES);
+  form.append("resume", file, file.name);
+  return form;
+}
+
+describe("a submission that satisfies every rule is NEVER refused", () => {
+  /**
+   * W3. `MAX_SUBMISSION_BODY_BYTES` was `MAX_RESUME_BYTES + 1MB`, which is not a
+   * bound on anything: text fields had no maximum length, so a 4-byte PDF next
+   * to a 12MB message came back `413 FILE_TOO_LARGE` while the measured file was
+   * three orders of magnitude under the cap. The pre-parse fast path could
+   * therefore refuse a request the declared rules said was fine, and silent
+   * refusal of a valid lead is this project's defining failure.
+   *
+   * The ceiling is now DERIVED from limits that are actually enforced, and the
+   * proof below is measured rather than argued: the heaviest legal submission is
+   * encoded, weighed, and required to sit under the ceiling AND come back 200.
+   */
+  it("keeps the declared ceiling above the heaviest legal submission", async () => {
+    const encoded = await new Request(`${ORIGIN}/submit`, {
+      method: "POST",
+      body: maximalValidSubmission(),
+    }).arrayBuffer();
+
+    expect(encoded.byteLength).toBeGreaterThan(MAX_RESUME_BYTES);
+    expect(encoded.byteLength).toBeLessThanOrEqual(MAX_SUBMISSION_BODY_BYTES);
+  });
+
+  it("delivers the heaviest legal submission end to end", async () => {
+    interceptZapier();
+
+    const response = await postForm(maximalValidSubmission());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+  });
+
+  /**
+   * The other half: the limits that make the ceiling provable have to be real.
+   * An unbounded text field is what made the old ceiling a fiction.
+   */
+  it("refuses a text field one byte over its cap as an INVALID submission", async () => {
+    const form = completeSubmission("General Question");
+    form.set("message", `${maximalText(MAX_TEXT_FIELD_BYTES)}x`);
+
+    const response = await postForm(form);
+
+    expect(response.status).toBe(400);
+    await expect(errorCodeOf(response)).resolves.toBe("INVALID_SUBMISSION");
+  });
+
+  it("refuses an absurdly long file name as an INVALID submission", async () => {
+    const name = `${"n".repeat(MAX_FILE_NAME_BYTES)}.pdf`;
+    const form = resumeSubmission(
+      makeFile(name, "application/pdf", PDF_MAGIC, 2048),
+    );
+
+    const response = await postForm(form);
+
+    expect(response.status).toBe(400);
+    await expect(errorCodeOf(response)).resolves.toBe("INVALID_SUBMISSION");
+  });
+
+  it("refuses more text fields than the payload budget accounts for", async () => {
+    const form = completeSubmission("General Question");
+    for (let i = 0; i < MAX_TEXT_FIELD_COUNT + 1; i += 1) {
+      form.append(`extra-${i}`, "padding");
+    }
+
+    const response = await postForm(form);
+
+    expect(response.status).toBe(400);
+    await expect(errorCodeOf(response)).resolves.toBe("INVALID_SUBMISSION");
+  });
+
+  it("derives the ceiling from the limits it actually enforces", () => {
+    expect(MAX_SUBMISSION_BODY_BYTES).toBeGreaterThanOrEqual(
+      MAX_RESUME_BYTES + MAX_TEXT_PAYLOAD_BYTES,
+    );
+    expect(MAX_TEXT_PAYLOAD_BYTES).toBe(
+      MAX_TEXT_FIELD_BYTES * MAX_TEXT_FIELD_COUNT,
+    );
+    // UTF-16 code units on the widget side, bytes here. The heaviest a single
+    // code unit can weigh is 3 bytes (a BMP character; a 4-byte character is a
+    // surrogate pair and so costs only 2 bytes per unit), so this product is
+    // the true upper bound on anything the form will accept.
+    expect(MAX_TEXT_FIELD_CHARS * 3).toBeLessThanOrEqual(MAX_TEXT_FIELD_BYTES);
+    expect(utf8Bytes(maximalText(MAX_TEXT_FIELD_BYTES))).toBe(
+      MAX_TEXT_FIELD_BYTES,
+    );
   });
 });
 
