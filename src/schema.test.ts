@@ -4,6 +4,12 @@ import {
   MAX_RESUME_BYTES,
   resumeFileSchema,
 } from "./schema";
+// Imported from the Worker's module on purpose: that copy is the authoritative
+// one, and reading it here is what makes drift between the two sides fail.
+import {
+  ALLOWED_RESUME_EXTENSIONS as SHARED_ALLOWED_RESUME_EXTENSIONS,
+  MAX_RESUME_BYTES as SHARED_MAX_RESUME_BYTES,
+} from "../worker/src/limits";
 
 // Helper to fabricate a File of a given size/type without allocating real bytes.
 function makeFile(name: string, type: string, size: number): File {
@@ -205,6 +211,49 @@ describe("Submit Resume", () => {
       inquiryType: "Submit Resume",
       ...resumeBase,
     });
+    expect(result.success).toBe(false);
+  });
+});
+
+/**
+ * The widget and the Worker must enforce the SAME limits, and the Worker's copy
+ * is authoritative. If the two drift, the widget starts promising something the
+ * server rejects and the user gets a confusing failure after upload.
+ *
+ * These tests drive the widget schema's boundary from the shared module rather
+ * than comparing the two constants to each other: a value comparison would still
+ * pass if `src/schema.ts` kept its own hardcoded limit and merely re-exported
+ * the shared one. Asserting behaviour at the boundary cannot be faked that way.
+ */
+describe("resume limits are shared with the Worker", () => {
+  it("accepts a file of exactly the shared maximum size", () => {
+    const result = resumeFileSchema.safeParse(
+      makeFile("cv.pdf", "application/pdf", SHARED_MAX_RESUME_BYTES),
+    );
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a file one byte over the shared maximum size", () => {
+    const result = resumeFileSchema.safeParse(
+      makeFile("cv.pdf", "application/pdf", SHARED_MAX_RESUME_BYTES + 1),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it.each(SHARED_ALLOWED_RESUME_EXTENSIONS)(
+    "accepts the shared extension %s",
+    (extension) => {
+      const result = resumeFileSchema.safeParse(
+        makeFile(`cv${extension}`, "", 1024),
+      );
+      expect(result.success).toBe(true);
+    },
+  );
+
+  it("rejects an extension the shared list does not carry", () => {
+    expect(SHARED_ALLOWED_RESUME_EXTENSIONS).not.toContain(".rtf");
+
+    const result = resumeFileSchema.safeParse(makeFile("cv.rtf", "", 1024));
     expect(result.success).toBe(false);
   });
 });

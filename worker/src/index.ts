@@ -14,6 +14,15 @@
  *      cross-origin readable would be a PII leak.
  */
 
+import {
+  hasAllowedResumeExtension,
+  hasAllowedResumeMagicBytes,
+  isAllowedResumeMimeType,
+  MAX_RESUME_BYTES,
+  MAX_SUBMISSION_BODY_BYTES,
+  RESUME_MAGIC_BYTE_LENGTH,
+} from "./limits";
+
 export interface Env {
   RESUMES: R2Bucket;
   ALLOWED_ORIGIN: string;
@@ -67,6 +76,158 @@ function errorResponse(
   });
 }
 
+/** Text fields every inquiry type must carry, whatever else it sends. */
+const REQUIRED_TEXT_FIELDS = [
+  "inquiryType",
+  "firstName",
+  "lastName",
+  "workEmail",
+  "message",
+] as const;
+
+const RESUME_INQUIRY_TYPE = "Submit Resume";
+
+function readText(formData: FormData, key: string): string {
+  const value = formData.get(key);
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * Decide whether the declared body size alone is enough to refuse the request.
+ *
+ * The header is attacker-controlled, so it is treated as an OPTIMIZATION and
+ * never as the gate: it can only cause an early rejection, never an early
+ * acceptance. A missing or non-numeric value deliberately falls through to the
+ * parser and the measured check in {@link validateResume}.
+ *
+ * Rejecting on a MISSING header was considered and refused: it would silently
+ * refuse a legitimate chunked client, and silent lead loss is the exact failure
+ * this Worker exists to eliminate. The platform still caps request bodies well
+ * above our limit, so the residual exposure is bounded rather than unbounded.
+ *
+ * The comparison is against MAX_SUBMISSION_BODY_BYTES, not MAX_RESUME_BYTES:
+ * the header measures the whole multipart envelope, so comparing it to the file
+ * cap would reject every resume sent at exactly the documented limit.
+ */
+function declaredBodyExceedsCap(request: Request): boolean {
+  const header = request.headers.get("Content-Length");
+  if (header === null) return false;
+
+  const declared = Number(header);
+  if (!Number.isFinite(declared)) return false;
+
+  return declared > MAX_SUBMISSION_BODY_BYTES;
+}
+
+/**
+ * Authoritative server-side resume validation on MEASURED bytes.
+ *
+ * The widget runs equivalent checks for a fast, friendly message, and none of
+ * that is trusted here: a client can post straight to this endpoint.
+ */
+async function validateResume(file: File): Promise<ErrorCode | null> {
+  if (file.size > MAX_RESUME_BYTES) return "FILE_TOO_LARGE";
+
+  if (
+    !hasAllowedResumeExtension(file.name) ||
+    !isAllowedResumeMimeType(file.type)
+  ) {
+    return "UNSUPPORTED_FILE_TYPE";
+  }
+
+  const head = new Uint8Array(
+    await file.slice(0, RESUME_MAGIC_BYTE_LENGTH).arrayBuffer(),
+  );
+  if (!hasAllowedResumeMagicBytes(head)) return "UNSUPPORTED_FILE_TYPE";
+
+  return null;
+}
+
+/**
+ * Candidate-level erasure index: `HMAC-SHA-256(normalised email, ERASURE_SALT)`.
+ *
+ * Storing the address itself would put PII in object metadata; storing a plain
+ * digest would let anyone confirm a guessed address. The salted HMAC lets us
+ * answer "delete everything belonging to this person" by recomputing the hash
+ * and matching it, and is reversible only to whoever holds the salt.
+ *
+ * Case and surrounding whitespace are normalised first, or the same person
+ * typing their address differently on two submissions produces two hashes and a
+ * deletion request silently misses one of them.
+ */
+async function computeSubjectHash(email: string, salt: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(salt),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(email.trim().toLowerCase()),
+  );
+  return [...new Uint8Array(signature)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Base for resume URLs, read from configuration.
+ *
+ * There is deliberately NO source-level fallback hostname. Hostnames are
+ * configuration; hardcoding one here would mean the pending domain migration
+ * needs a code change, and a stale literal would hand staff links to the wrong
+ * origin.
+ */
+function resumeUrlBase(env: Env): string {
+  return (env.RESUME_URL_BASE ?? "").trim().replace(/\/+$/, "");
+}
+
+type StoredResume = { resumeUrl: string; resumeFileName: string };
+
+/**
+ * Persist the resume, then report the URL Zapier will carry.
+ *
+ * Storage happens BEFORE the Zapier forward on purpose: a lead that arrives
+ * pointing at a CV we never stored is unrecoverable, whereas a stored object
+ * whose forward failed is a retained orphan and an accepted cost.
+ */
+async function storeResume(
+  file: File,
+  workEmail: string,
+  submittedAt: string,
+  env: Env,
+): Promise<StoredResume | ErrorCode> {
+  const base = resumeUrlBase(env);
+  if (base === "") return "STORAGE_FAILED";
+
+  const submissionId = crypto.randomUUID();
+  const subjectHash = await computeSubjectHash(workEmail, env.ERASURE_SALT);
+
+  try {
+    await env.RESUMES.put(submissionId, file, {
+      httpMetadata: {
+        contentType: file.type || "application/octet-stream",
+      },
+      customMetadata: {
+        originalFileName: file.name,
+        submittedAt,
+        submissionId,
+        subjectHash,
+      },
+    });
+  } catch {
+    // The caught error is deliberately dropped rather than logged or echoed:
+    // it can carry bucket names and request detail we do not want in output.
+    return "STORAGE_FAILED";
+  }
+
+  return { resumeUrl: `${base}/${submissionId}`, resumeFileName: file.name };
+}
+
 /**
  * Handle a public form submission.
  *
@@ -78,6 +239,10 @@ function errorResponse(
 async function handleSubmit(request: Request, env: Env): Promise<Response> {
   const cors = corsHeaders(env);
 
+  if (declaredBodyExceedsCap(request)) {
+    return errorResponse("FILE_TOO_LARGE", cors);
+  }
+
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -85,12 +250,48 @@ async function handleSubmit(request: Request, env: Env): Promise<Response> {
     return errorResponse("INVALID_SUBMISSION", cors);
   }
 
-  void formData;
-  return errorResponse("INVALID_SUBMISSION", cors);
+  for (const field of REQUIRED_TEXT_FIELDS) {
+    if (readText(formData, field) === "") {
+      return errorResponse("INVALID_SUBMISSION", cors);
+    }
+  }
+
+  const resume = formData.get("resume");
+  const file = resume instanceof File && resume.size > 0 ? resume : null;
+
+  let stored: StoredResume = { resumeUrl: "", resumeFileName: "" };
+  const submittedAt = new Date().toISOString();
+
+  if (file === null) {
+    // Only the resume flow requires a file; the other inquiry types are
+    // text-only and must keep working.
+    if (readText(formData, "inquiryType") === RESUME_INQUIRY_TYPE) {
+      return errorResponse("INVALID_SUBMISSION", cors);
+    }
+  } else {
+    const rejection = await validateResume(file);
+    if (rejection !== null) return errorResponse(rejection, cors);
+
+    const result = await storeResume(
+      file,
+      readText(formData, "workEmail"),
+      submittedAt,
+      env,
+    );
+    if (typeof result === "string") return errorResponse(result, cors);
+    stored = result;
+  }
+
+  void stored;
+  return errorResponse("FORWARD_FAILED", cors);
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    _ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/submit") {

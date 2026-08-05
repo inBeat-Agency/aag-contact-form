@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+import {
+  hasAllowedResumeExtension,
+  isAllowedResumeMimeType,
+  MAX_RESUME_BYTES,
+} from "../worker/src/limits";
+
 /**
  * Single source of truth for the AAG Contact Us widget data contract.
  *
@@ -34,16 +40,19 @@ export const BUDGETS = [
 
 export const TIMELINES = ["ASAP", "1-3 months", "1-6 months", "6+ months"] as const;
 
-// File constraints for the Submit Resume flow.
-export const MAX_RESUME_BYTES = 10 * 1024 * 1024; // 10MB
-
-export const ALLOWED_RESUME_EXTENSIONS = [".pdf", ".doc", ".docx"] as const;
-
-const ALLOWED_RESUME_MIME = new Set([
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-]);
+/**
+ * File constraints for the Submit Resume flow.
+ *
+ * These are RE-EXPORTS, not definitions. The values live in
+ * `worker/src/limits.ts` because the Worker re-validates every upload and its
+ * copy is the authoritative one — a client can bypass everything in this file.
+ * Keeping a second hardcoded copy here is how the form ends up promising a limit
+ * the server does not honour, so do not inline them back.
+ */
+export {
+  ALLOWED_RESUME_EXTENSIONS,
+  MAX_RESUME_BYTES,
+} from "../worker/src/limits";
 
 // ---------------------------------------------------------------------------
 // Reusable primitives.
@@ -94,12 +103,11 @@ const resumeFile = z
   })
   .refine((file) => file.size > 0, "Please upload your resume")
   .refine((file) => file.size <= MAX_RESUME_BYTES, "File must be 10MB or less")
-  .refine((file) => {
-    const name = file.name.toLowerCase();
-    const extOk = ALLOWED_RESUME_EXTENSIONS.some((ext) => name.endsWith(ext));
-    const mimeOk = file.type === "" || ALLOWED_RESUME_MIME.has(file.type);
-    return extOk && mimeOk;
-  }, "Resume must be a PDF or Word document");
+  .refine(
+    (file) =>
+      hasAllowedResumeExtension(file.name) && isAllowedResumeMimeType(file.type),
+    "Resume must be a PDF or Word document",
+  );
 
 export const resumeFileSchema = z.preprocess(normalizeResumeFile, resumeFile);
 
