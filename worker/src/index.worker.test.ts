@@ -571,6 +571,127 @@ describe("POST /submit - storage failure", () => {
   });
 });
 
+type MandatoryBinding =
+  | "ZAPIER_HOOK_URL"
+  | "ZAPIER_SHARED_SECRET"
+  | "ERASURE_SALT";
+
+/** `env` with one binding deleted outright, as an unset Worker secret arrives. */
+function envWithout(binding: MandatoryBinding): typeof env {
+  const clone = { ...env } as Record<string, unknown>;
+  delete clone[binding];
+  return clone as typeof env;
+}
+
+describe("POST /submit - a misconfigured deploy fails loudly, before any side effect", () => {
+  /**
+   * C2. An unset Worker secret does not throw; it arrives as `undefined`, and
+   * `undefined` interpolated into a header is the literal string "undefined".
+   * The Zap filter rejects that while the Catch Hook still answers 200, so the
+   * Worker reported `{"ok":true}` for every lead it silently destroyed - on a
+   * deploy that passed the bodyless probe, because the probe never gets far
+   * enough to touch a secret.
+   *
+   * So the bindings are checked FIRST, ahead of parsing, storage and network.
+   * Two consequences are deliberate:
+   *
+   *   - No R2 object is written. A misconfigured deploy leaves no PII behind,
+   *     which is why every row below also asserts the bucket is untouched.
+   *   - The bodyless probe now FAILS on a misconfigured deploy instead of
+   *     reporting it healthy. That is the point: the gate that was blind to this
+   *     failure becomes the gate that catches it.
+   */
+  const MISCONFIGURATIONS: [string, typeof env, string][] = [
+    ["ZAPIER_HOOK_URL omitted", envWithout("ZAPIER_HOOK_URL"), "FORWARD_FAILED"],
+    [
+      "ZAPIER_HOOK_URL blank",
+      { ...env, ZAPIER_HOOK_URL: "" },
+      "FORWARD_FAILED",
+    ],
+    [
+      "ZAPIER_HOOK_URL whitespace only",
+      { ...env, ZAPIER_HOOK_URL: "   " },
+      "FORWARD_FAILED",
+    ],
+    [
+      "ZAPIER_SHARED_SECRET omitted",
+      envWithout("ZAPIER_SHARED_SECRET"),
+      "FORWARD_FAILED",
+    ],
+    [
+      "ZAPIER_SHARED_SECRET blank",
+      { ...env, ZAPIER_SHARED_SECRET: "" },
+      "FORWARD_FAILED",
+    ],
+    ["ERASURE_SALT omitted", envWithout("ERASURE_SALT"), "STORAGE_FAILED"],
+    ["ERASURE_SALT blank", { ...env, ERASURE_SALT: "" }, "STORAGE_FAILED"],
+  ];
+
+  it.each(MISCONFIGURATIONS)(
+    "refuses the submission when %s, storing nothing",
+    async (_label, brokenEnv, expectedCode) => {
+      const ctx = createExecutionContext();
+      const response = await worker.fetch(
+        new Request(`${ORIGIN}/submit`, {
+          method: "POST",
+          body: resumeSubmission(),
+        }),
+        brokenEnv,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+
+      expect(response.status).toBe(502);
+      await expect(errorCodeOf(response)).resolves.toBe(expectedCode);
+
+      const listing = await env.RESUMES.list();
+      expect(listing.objects).toHaveLength(0);
+    },
+  );
+
+  /**
+   * The missing salt used to escape the error enum entirely: `importKey` with a
+   * zero-length secret throws `DataError: Zero-length key is not supported`
+   * outside the storage try/catch, so the isolate produced an unhandled
+   * exception and a body no probe and no client can interpret.
+   */
+  it("answers from the fixed enum when ERASURE_SALT is missing, never an unhandled throw", async () => {
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      envWithout("ERASURE_SALT"),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "STORAGE_FAILED",
+    });
+  });
+
+  /**
+   * The probe contract, restated for a broken deploy. A bodyless POST is what
+   * the post-deploy gate sends; on a deploy missing its secrets it must NOT come
+   * back as the healthy 400.
+   */
+  it("fails the bodyless probe signature when a secret is missing", async () => {
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, { method: "POST" }),
+      envWithout("ZAPIER_SHARED_SECRET"),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).not.toBe(400);
+    await expect(errorCodeOf(response)).resolves.toBe("FORWARD_FAILED");
+  });
+});
+
 function headerValue(
   headers: Record<string, string> | undefined,
   name: string,

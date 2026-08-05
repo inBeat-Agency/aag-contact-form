@@ -88,6 +88,36 @@ function fail(
   };
 }
 
+/**
+ * Bindings without which this Worker cannot do its job, and the enum member each
+ * missing one reports.
+ *
+ * An unset Worker secret does NOT throw on access — it arrives as `undefined`.
+ * Interpolated into a header that becomes the literal string "undefined": the
+ * Zap's filter rejects it, the Catch Hook still answers 200, and the Worker
+ * cheerfully reports `{"ok":true}` for a lead nobody received. A provisioning
+ * mistake turning into a silent success is precisely the failure this Worker
+ * exists to eliminate, so configuration is checked as configuration.
+ *
+ * A blank string is treated exactly like a missing one. `wrangler secret put`
+ * with an empty value, or a var left as `""` in the TOML, is not a configured
+ * deploy — and an empty ERASURE_SALT additionally throws a raw `DataError` out
+ * of `importKey`, escaping both the error enum and the log allowlist.
+ */
+const MANDATORY_BINDINGS = [
+  ["ZAPIER_HOOK_URL", "FORWARD_FAILED"],
+  ["ZAPIER_SHARED_SECRET", "FORWARD_FAILED"],
+  ["ERASURE_SALT", "STORAGE_FAILED"],
+] as const satisfies readonly (readonly [keyof Env, ErrorCode])[];
+
+/** The enum member for the first unusable binding, or null when all are set. */
+function misconfiguredBinding(env: Env): ErrorCode | null {
+  for (const [name, code] of MANDATORY_BINDINGS) {
+    if (String(env[name] ?? "").trim() === "") return code;
+  }
+  return null;
+}
+
 /** Text fields every inquiry type must carry, whatever else it sends. */
 const REQUIRED_TEXT_FIELDS = [
   "inquiryType",
@@ -297,6 +327,12 @@ async function forwardToZapier(
  */
 async function handleSubmit(request: Request, env: Env): Promise<Routed> {
   const cors = corsHeaders(env);
+
+  // FIRST, ahead of parsing, storage and network. A deploy that cannot deliver a
+  // lead must never write a candidate's CV into R2 and must never answer the
+  // post-deploy probe with the healthy signature.
+  const misconfigured = misconfiguredBinding(env);
+  if (misconfigured !== null) return fail(misconfigured, cors);
 
   if (declaredBodyExceedsCap(request)) {
     return fail("FILE_TOO_LARGE", cors);
