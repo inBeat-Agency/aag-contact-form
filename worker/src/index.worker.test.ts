@@ -941,6 +941,66 @@ describe("POST /submit - 2xx only when storage AND forwarding both succeed", () 
   });
 });
 
+type ConsoleCall = { method: string; args: unknown[] };
+
+/**
+ * Flatten a logged value into text a leak scan can actually search.
+ *
+ * WHY THIS EXISTS, AND WHY `JSON.stringify` IS BANNED HERE.
+ *
+ * This guard used to capture console output with
+ * `args.map((a) => JSON.stringify(a) ?? String(a))`. Both
+ * `JSON.stringify(new Error("boom <secret>"))` and
+ * `JSON.stringify(new Headers({ "X-AAG-Worker-Auth": "<secret>" }))` evaluate to
+ * the string `"{}"` — Error's own properties are non-enumerable and Headers
+ * keeps its data in internal slots. So the two log calls this test exists to
+ * forbid, `console.error(rawFetchError)` and `console.error(request.headers)`,
+ * both serialised to `{}` and sailed through green.
+ *
+ * A security control whose serializer erases exactly the objects most likely to
+ * carry a secret is worse than no control: it certifies the leak. So Errors are
+ * unwrapped field by field (name, message, stack, cause), Headers are
+ * enumerated, and Request/Response are opened up rather than stringified.
+ */
+function leakScanText(value: unknown, depth = 0): string {
+  if (depth > 6) return "";
+
+  if (value instanceof Error) {
+    return [
+      value.name,
+      value.message,
+      value.stack ?? "",
+      value.cause === undefined ? "" : leakScanText(value.cause, depth + 1),
+    ].join(" ");
+  }
+  if (value instanceof Headers) {
+    return [...value.entries()].map(([k, v]) => `${k}: ${v}`).join(" ");
+  }
+  if (value instanceof Request || value instanceof Response) {
+    const url = value instanceof Request ? value.url : "";
+    return `${url} ${leakScanText(value.headers, depth + 1)}`;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => leakScanText(entry, depth + 1)).join(" ");
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, entry]) => `${key}: ${leakScanText(entry, depth + 1)}`)
+      .join(" ");
+  }
+  return String(value);
+}
+
+/** The complete, exclusive key set of the one line this Worker may emit. */
+const ALLOWLISTED_LOG_KEYS = [
+  "durationMs",
+  "errorCode",
+  "origin",
+  "path",
+  "requestId",
+  "status",
+];
+
 describe("logging never leaks a secret", () => {
 
   const SECRETS = () => [
@@ -949,15 +1009,37 @@ describe("logging never leaks a secret", () => {
     env.ERASURE_SALT,
   ];
 
-  function captureConsole() {
-    const lines: string[] = [];
-    const record = (...args: unknown[]) => {
-      lines.push(args.map((a) => JSON.stringify(a) ?? String(a)).join(" "));
-    };
+  /** Raw arguments, captured unserialised. Flattening at capture time is what
+   * destroyed the evidence before it could ever be asserted on. */
+  function captureConsole(): ConsoleCall[] {
+    const calls: ConsoleCall[] = [];
     for (const method of ["log", "info", "warn", "error", "debug"] as const) {
-      vi.spyOn(console, method).mockImplementation(record);
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        calls.push({ method, args });
+      });
     }
-    return lines;
+    return calls;
+  }
+
+  function scanText(calls: ConsoleCall[]): string {
+    return calls
+      .map((call) => call.args.map((arg) => leakScanText(arg)).join(" "))
+      .join("\n");
+  }
+
+  /**
+   * The strongest assertion in this file: every console call the Worker makes
+   * must be the single allowlisted structured line. A `console.error(err)` fails
+   * on the method, on the argument count and on the key set at once.
+   */
+  function expectOnlyAllowlistedLines(calls: ConsoleCall[]) {
+    for (const call of calls) {
+      expect(call.method).toBe("log");
+      expect(call.args).toHaveLength(1);
+      expect(Object.keys(call.args[0] as object).sort()).toEqual(
+        ALLOWLISTED_LOG_KEYS,
+      );
+    }
   }
 
   afterEach(() => {
@@ -971,27 +1053,20 @@ describe("logging never leaks a secret", () => {
    * emitted and carries exactly the permitted keys.
    */
   it("emits one allowlisted log line per request", async () => {
-    const lines = captureConsole();
+    const calls = captureConsole();
     interceptZapier();
 
     await postForm(resumeSubmission());
 
-    expect(lines).toHaveLength(1);
-    const logged = JSON.parse(lines[0]!) as Record<string, unknown>;
-    expect(Object.keys(logged).sort()).toEqual([
-      "durationMs",
-      "errorCode",
-      "origin",
-      "path",
-      "requestId",
-      "status",
-    ]);
+    expect(calls).toHaveLength(1);
+    expectOnlyAllowlistedLines(calls);
+    const logged = calls[0]!.args[0] as Record<string, unknown>;
     expect(logged.path).toBe("/submit");
     expect(logged.status).toBe(200);
   });
 
   it("records the received Origin so a misconfigured allowlist is diagnosable", async () => {
-    const lines = captureConsole();
+    const calls = captureConsole();
     interceptZapier();
 
     await SELF.fetch(`${ORIGIN}/submit`, {
@@ -1000,14 +1075,15 @@ describe("logging never leaks a secret", () => {
       headers: { Origin: "https://wrong-origin.test" },
     });
 
-    expect(JSON.parse(lines[0]!).origin).toBe("https://wrong-origin.test");
+    const logged = calls[0]!.args[0] as Record<string, unknown>;
+    expect(logged.origin).toBe("https://wrong-origin.test");
   });
 
   /**
    * The absence half, driven across EVERY error path rather than one of them.
    */
   it("leaks no secret while driving every error path", async () => {
-    const lines = captureConsole();
+    const calls = captureConsole();
 
     // 400 - unparseable body
     await SELF.fetch(`${ORIGIN}/submit`, { method: "POST" });
@@ -1027,20 +1103,30 @@ describe("logging never leaks a secret", () => {
     interceptZapier(500, "upstream exploded");
     await postForm(resumeSubmission());
 
-    expect(lines.length).toBeGreaterThanOrEqual(5);
-    const output = lines.join("\n");
+    expect(calls.length).toBeGreaterThanOrEqual(5);
+    expectOnlyAllowlistedLines(calls);
+    const output = scanText(calls);
     for (const secret of SECRETS()) {
       expect(secret.length).toBeGreaterThan(0);
       expect(output).not.toContain(secret);
     }
     expect(output).not.toContain("upstream exploded");
-    expect(output).not.toContain("x-aag-worker-auth");
+    expect(output.toLowerCase()).not.toContain("x-aag-worker-auth");
   });
 
-  it("leaks no secret when the R2 put throws", async () => {
-    const lines = captureConsole();
+  /**
+   * A REJECTED PROMISE CARRYING EVERY SECRET, which is the shape the old guard
+   * could not see. The previous version drove a 500 *response* instead - an
+   * ordinary status code with nothing sensitive attached - so the branch that
+   * catches a thrown error was never exercised with anything worth leaking.
+   */
+  it("leaks no secret when the R2 put throws an error containing all of them", async () => {
+    const calls = captureConsole();
+    const poisoned = new Error(
+      `r2 exploded ${env.ZAPIER_HOOK_URL} ${env.ZAPIER_SHARED_SECRET} ${env.ERASURE_SALT}`,
+    );
     const failingBucket = {
-      put: () => Promise.reject(new Error(`boom ${env.ERASURE_SALT}`)),
+      put: () => Promise.reject(poisoned),
     } as unknown as R2Bucket;
 
     const ctx = createExecutionContext();
@@ -1054,9 +1140,65 @@ describe("logging never leaks a secret", () => {
     );
     await waitOnExecutionContext(ctx);
 
-    const output = lines.join("\n");
+    expectOnlyAllowlistedLines(calls);
+    const output = scanText(calls);
     expect(output).toContain("STORAGE_FAILED");
-    expect(output).not.toContain(env.ERASURE_SALT);
+    for (const secret of SECRETS()) {
+      expect(secret.length).toBeGreaterThan(0);
+      expect(output).not.toContain(secret);
+    }
+    expect(output).not.toContain("r2 exploded");
+  });
+
+  it("leaks no secret when the outbound fetch throws an error containing all of them", async () => {
+    const calls = captureConsole();
+    const poisoned = new Error(
+      `connect ECONNREFUSED ${env.ZAPIER_HOOK_URL} ${env.ZAPIER_SHARED_SECRET} ${env.ERASURE_SALT}`,
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(() => Promise.reject(poisoned));
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    fetchSpy.mockRestore();
+
+    await expect(errorCodeOf(response)).resolves.toBe("FORWARD_FAILED");
+    expectOnlyAllowlistedLines(calls);
+    const output = scanText(calls);
+    for (const secret of SECRETS()) {
+      expect(secret.length).toBeGreaterThan(0);
+      expect(output).not.toContain(secret);
+    }
+    expect(output).not.toContain("ECONNREFUSED");
+  });
+
+  /**
+   * Proof that the scanner can see what it claims to see.
+   *
+   * Without this, every assertion above is unfalsifiable: a serializer that
+   * silently collapses Errors and Headers to `{}` produces exactly the same
+   * green run as a Worker that leaks nothing. These two cases pin the capability
+   * itself, so a future "simplification" back to `JSON.stringify` fails here
+   * instead of quietly disarming the whole guard.
+   */
+  it("can see a secret inside an Error and inside a Headers collection", () => {
+    const secret = env.ZAPIER_SHARED_SECRET;
+
+    expect(JSON.stringify(new Error(`boom ${secret}`))).toBe("{}");
+    expect(leakScanText(new Error(`boom ${secret}`))).toContain(secret);
+
+    const headers = new Headers({ "X-AAG-Worker-Auth": secret });
+    expect(JSON.stringify(headers)).toBe("{}");
+    expect(leakScanText(headers)).toContain(secret);
   });
 });
 
