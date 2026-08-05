@@ -307,6 +307,54 @@ describe("POST /submit - server-side resume validation is authoritative", () => 
   });
 });
 
+describe("the 10MB limit is a published promise, not whatever the constant says", () => {
+  /**
+   * W1. Every other boundary test in this file builds its input from
+   * `MAX_RESUME_BYTES`, so it asserts that the Worker agrees with itself and
+   * nothing more. Change the constant to 1 MB and all of them stay green while
+   * the form still tells candidates 10MB and the server starts refusing at one
+   * tenth of it - silent lead loss, shipped by a fully green suite.
+   *
+   * So this literal is deliberately NOT imported. It is the number in the UI
+   * copy, written out again, and the only test here that can notice the two
+   * drifting apart.
+   */
+  const TEN_MEGABYTES = 10 * 1024 * 1024;
+
+  it("still defines the shared limit as exactly 10MB", () => {
+    expect(MAX_RESUME_BYTES).toBe(TEN_MEGABYTES);
+  });
+
+  it("delivers a resume of exactly 10485760 bytes end to end", async () => {
+    interceptZapier();
+    const atPromise = makeFile(
+      "Jane-Doe-CV.pdf",
+      "application/pdf",
+      PDF_MAGIC,
+      TEN_MEGABYTES,
+    );
+
+    const response = await postForm(resumeSubmission(atPromise));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("refuses a resume one byte over 10485760", async () => {
+    const overPromise = makeFile(
+      "Jane-Doe-CV.pdf",
+      "application/pdf",
+      PDF_MAGIC,
+      TEN_MEGABYTES + 1,
+    );
+
+    const response = await postForm(resumeSubmission(overPromise));
+
+    expect(response.status).toBe(413);
+    await expect(errorCodeOf(response)).resolves.toBe("FILE_TOO_LARGE");
+  });
+});
+
 describe("POST /submit - Content-Length is an optimization, measured size is the gate", () => {
   /**
    * W4, and the 400-vs-413 split below is the whole point.
