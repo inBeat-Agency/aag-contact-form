@@ -252,6 +252,17 @@ async function storeResume(
  * so a stranger who scraped the old public hook URL can no longer inject leads,
  * and keeping it out of the body leaves the 15-key contract frozen.
  *
+ * REDIRECTS ARE NEVER FOLLOWED, and that is a security control rather than a
+ * preference. `fetch` follows them by default, so an expired or repointed hook
+ * answering 302 would send us to whatever the Location names, that stranger
+ * would answer 200, and this function would report a delivered lead that Zapier
+ * never received - the same "2xx that does not mean delivery" this Worker was
+ * built to kill, one layer down. Worse, a custom header is not stripped on a
+ * cross-origin hop, so the shared secret would be handed to the redirect target.
+ *
+ * With `manual` a 3xx is returned as a 3xx, `response.ok` is false, and the
+ * request fails closed with no second hop to leak to.
+ *
  * Failures collapse to `false`. The caught error is never logged, wrapped or
  * returned: it can carry the hook URL and the request we just sent.
  */
@@ -262,12 +273,14 @@ async function forwardToZapier(
   try {
     const response = await fetch(env.ZAPIER_HOOK_URL, {
       method: "POST",
+      redirect: "manual",
       headers: {
         "Content-Type": "application/json",
         "X-AAG-Worker-Auth": env.ZAPIER_SHARED_SECRET,
       },
       body: JSON.stringify(payload),
     });
+    // `ok` is 200-299 only, so every 3xx lands here as a failure.
     return response.ok;
   } catch {
     return false;

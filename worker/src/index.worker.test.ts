@@ -776,7 +776,16 @@ describe("POST /submit - 2xx only when storage AND forwarding both succeed", () 
     expect(listing.objects).toHaveLength(1);
   });
 
-  it("answers 502 FORWARD_FAILED when Zapier answers a non-2xx redirect-ish status", async () => {
+  /**
+   * A 404 from the hook is a DELETED OR MISTYPED hook, which is the single most
+   * likely production failure once the old Catch Hook is revoked.
+   *
+   * This test used to be named "…a non-2xx redirect-ish status" while replying
+   * 404. Nothing here is redirect-ish, and that name was the reason the real
+   * redirect hole went unnoticed: the suite looked like it covered redirects.
+   * The genuine redirect case is its own describe block further down.
+   */
+  it("answers 502 FORWARD_FAILED when the hook itself is gone (404)", async () => {
     interceptZapier(404, "no such hook");
 
     const response = await postForm(resumeSubmission());
@@ -927,6 +936,92 @@ describe("logging never leaks a secret", () => {
     const output = lines.join("\n");
     expect(output).toContain("STORAGE_FAILED");
     expect(output).not.toContain(env.ERASURE_SALT);
+  });
+});
+
+const REDIRECT_ORIGIN = "https://redirect-target.test";
+const REDIRECT_PATH = "/landed";
+
+describe("POST /submit - a redirected hook is a FAILED forward, never a success", () => {
+  /**
+   * The founding disaster of this project was "a 2xx that does not mean
+   * delivery". `fetch` following redirects recreates it one layer down: if the
+   * hook 302s - expired, moved, or replaced by a parking page - the Worker walks
+   * to wherever the Location points, that stranger answers 200, and the lead is
+   * reported delivered to a Zap that never saw it.
+   *
+   * THE LOAD-BEARING ASSERTION IS ON THE OUTBOUND REQUEST, not on an observed
+   * hop. `fetchMock` does not implement redirect following, so a 302 interceptor
+   * comes straight back to the caller and the behavioural test below sees
+   * `landed.calls === 0` whether or not the Worker asked to follow it. That
+   * control is blind to the very bug it names: it passed green against the
+   * implementation that handed the secret to a live redirect target.
+   *
+   * The redirect POLICY is what this harness can actually observe, and it is the
+   * whole fix.
+   */
+  it("asks fetch NOT to follow redirects when forwarding to the hook", async () => {
+    const outbound: RequestInit[] = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) => {
+        outbound.push(init ?? {});
+        return new Response('{"status":"success"}', { status: 200 });
+      });
+
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    fetchSpy.mockRestore();
+
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0]!.redirect).toBe("manual");
+  });
+
+  /**
+   * The destination below is deliberately reachable and deliberately friendly.
+   * A test where the redirect target is unreachable proves nothing: the request
+   * would fail for lack of a route rather than because we refused to follow it.
+   */
+  it("answers 502 FORWARD_FAILED when the hook answers 302, and hands the secret to nobody", async () => {
+    fetchMock
+      .get(ZAPIER_ORIGIN)
+      .intercept({ path: ZAPIER_PATH, method: "POST" })
+      .reply(302, "", {
+        headers: { Location: `${REDIRECT_ORIGIN}${REDIRECT_PATH}` },
+      });
+
+    // Any method: 302 rewrites POST to GET, so pinning the method here would
+    // let the follow-up miss the interceptor and fail for the wrong reason.
+    const landed: { calls: number; auth: string[] } = { calls: 0, auth: [] };
+    fetchMock
+      .get(REDIRECT_ORIGIN)
+      .intercept({ path: REDIRECT_PATH, method: () => true })
+      .reply(200, (options) => {
+        landed.calls += 1;
+        landed.auth.push(
+          headerValue(
+            options.headers as Record<string, string>,
+            "x-aag-worker-auth",
+          ),
+        );
+        return '{"status":"success"}';
+      })
+      .persist();
+
+    const response = await postForm(resumeSubmission());
+
+    expect(response.status).toBe(502);
+    await expect(errorCodeOf(response)).resolves.toBe("FORWARD_FAILED");
+    expect(landed.calls).toBe(0);
+    expect(landed.auth).toEqual([]);
   });
 });
 
