@@ -542,14 +542,53 @@ function resumeDownloadHeaders(
 }
 
 /**
+ * Header Cloudflare Access adds once it has authenticated the reader.
+ *
+ * Read as a SINGLE VALUE, never as a collection. Logging the whole header set
+ * would put the Access session cookie into the log line.
+ */
+const ACCESS_IDENTITY_HEADER = "Cf-Access-Authenticated-User-Email";
+
+/** Deliberately loud: on a gated hostname, an unattributable read is an alarm. */
+const NO_ACCESS_IDENTITY = "<no-access-identity>";
+
+/**
+ * The only record of who read which CV.
+ *
+ * Access authenticates the reader at the edge and then forgets, so without this
+ * line PII access on this route is unattributable after the fact - there is no
+ * other place the pairing exists.
+ *
+ * Two keys, on purpose. The candidate is already identified by the key; copying
+ * their address in as well would spread the PII this route exists to protect.
+ * A missing identity is recorded rather than skipped: on a hostname that is
+ * supposed to be gated, its absence means the request reached this Worker
+ * WITHOUT passing Access, and that is exactly the event worth finding later.
+ */
+function auditResumeDownload(request: Request, key: string): void {
+  console.log({
+    key,
+    email: request.headers.get(ACCESS_IDENTITY_HEADER) ?? NO_ACCESS_IDENTITY,
+  });
+}
+
+/**
  * Stream a stored resume to an already-authenticated staff member.
  *
  * The 404 for a missing object is the SAME fixed 404 a wrong host gets, and that
  * is intentional: the response must not tell a caller whether a key exists.
  */
-async function handleResumeDownload(key: string, env: Env): Promise<Routed> {
+async function handleResumeDownload(
+  request: Request,
+  key: string,
+  env: Env,
+): Promise<Routed> {
   const object = await env.RESUMES.get(key);
   if (object === null) return fail("NOT_FOUND");
+
+  // Written at the moment the object is read, not assembled at the end, so a
+  // later failure cannot drop the record of a read that already happened.
+  auditResumeDownload(request, key);
 
   return {
     response: new Response(object.body, {
@@ -597,7 +636,7 @@ async function route(
     isResumeHost(env, url)
   ) {
     const key = url.pathname.slice(RESUME_PATH_PREFIX.length);
-    if (key !== "") return handleResumeDownload(key, env);
+    if (key !== "") return handleResumeDownload(request, key, env);
   }
 
   return fail("NOT_FOUND");

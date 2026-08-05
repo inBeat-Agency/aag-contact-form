@@ -1347,7 +1347,24 @@ function leakScanText(value: unknown, depth = 0): string {
   return String(value);
 }
 
-/** The complete, exclusive key set of the one line this Worker may emit. */
+/** Raw arguments, captured unserialised. Flattening at capture time is what
+ * destroyed the evidence before it could ever be asserted on. */
+function captureConsole(): ConsoleCall[] {
+  const calls: ConsoleCall[] = [];
+  for (const method of ["log", "info", "warn", "error", "debug"] as const) {
+    vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+      calls.push({ method, args });
+    });
+  }
+  return calls;
+}
+
+/** The sorted key set of each console call, in the order they were emitted. */
+function loggedKeySets(calls: ConsoleCall[]): string[][] {
+  return calls.map((call) => Object.keys(call.args[0] as object).sort());
+}
+
+/** The complete, exclusive key set of the request line this Worker may emit. */
 const ALLOWLISTED_LOG_KEYS = [
   "durationMs",
   "errorCode",
@@ -1364,18 +1381,6 @@ describe("logging never leaks a secret", () => {
     env.ZAPIER_SHARED_SECRET,
     env.ERASURE_SALT,
   ];
-
-  /** Raw arguments, captured unserialised. Flattening at capture time is what
-   * destroyed the evidence before it could ever be asserted on. */
-  function captureConsole(): ConsoleCall[] {
-    const calls: ConsoleCall[] = [];
-    for (const method of ["log", "info", "warn", "error", "debug"] as const) {
-      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
-        calls.push({ method, args });
-      });
-    }
-    return calls;
-  }
 
   function scanText(calls: ConsoleCall[]): string {
     return calls
@@ -2002,6 +2007,103 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
       expect(refusal.status).toBe(404);
       expect(refusal.headerNames).toEqual(RESUME_404_HEADERS);
     }
+  });
+
+  /**
+   * PER-DOWNLOAD AUDIT.
+   *
+   * This line is the ONLY record of who read which CV. Access authenticates the
+   * reader at the edge and then forgets; without this, PII access on this route
+   * is completely unattributable after the fact.
+   *
+   * It is deliberately two keys wide. The candidate's own details are NOT in it:
+   * the subject is already identified by the key, and copying their email into
+   * the log would spread the PII this route exists to protect.
+   */
+  const AUDIT_LOG_KEYS = ["email", "key"];
+  const ACCESS_EMAIL_HEADER = "Cf-Access-Authenticated-User-Email";
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("audits a successful download with the key and the Access identity", async () => {
+    const calls = captureConsole();
+
+    await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), {
+      headers: { [ACCESS_EMAIL_HEADER]: "staff.member@example.test" },
+    });
+
+    // Exactly two lines, in this order: the audit is written at the moment the
+    // object is read, not assembled at the end where a later throw could skip
+    // it, and the request line keeps its own untouched shape.
+    expect(loggedKeySets(calls)).toEqual([AUDIT_LOG_KEYS, ALLOWLISTED_LOG_KEYS]);
+    expect(calls[0]!.args[0]).toEqual({
+      key: STORED_RESUME_KEY,
+      email: "staff.member@example.test",
+    });
+  });
+
+  /**
+   * On a hostname that is supposed to be gated, a download with no Access
+   * identity is not a formatting nicety - it means the request reached the
+   * Worker without passing Access, which is the C1 failure. It gets a loud,
+   * greppable marker rather than an empty string that reads like a blank field.
+   */
+  it("marks a download as unattributable when Access sent no identity", async () => {
+    const calls = captureConsole();
+
+    await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY));
+
+    expect(loggedKeySets(calls)).toEqual([AUDIT_LOG_KEYS, ALLOWLISTED_LOG_KEYS]);
+    expect(calls[0]!.args[0]).toEqual({
+      key: STORED_RESUME_KEY,
+      email: "<no-access-identity>",
+    });
+  });
+
+  /**
+   * Nothing was read, so there is nothing to attribute. An audit line on a
+   * refusal would also turn the log into a key-probing oracle.
+   */
+  it("writes no audit line for any /resume refusal", async () => {
+    const calls = captureConsole();
+
+    const refusals = [
+      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY), {
+        headers: { [ACCESS_EMAIL_HEADER]: "staff.member@example.test" },
+      }),
+      await probeResume(
+        resumeUrl(env.RESUME_HOST, "00000000-0000-4000-8000-000000000000"),
+      ),
+      await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), {
+        method: "POST",
+      }),
+    ];
+
+    expect(refusals.map((refusal) => refusal.status)).toEqual([404, 404, 404]);
+    expect(loggedKeySets(calls)).toEqual([
+      ALLOWLISTED_LOG_KEYS,
+      ALLOWLISTED_LOG_KEYS,
+      ALLOWLISTED_LOG_KEYS,
+    ]);
+  });
+
+  /**
+   * The audit must not smuggle the reader's identity into the request line,
+   * where the log allowlist would silently start carrying PII on every request
+   * the Worker serves - including the public ones.
+   */
+  it("keeps the Access identity out of the request log line", async () => {
+    const calls = captureConsole();
+
+    await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), {
+      headers: { [ACCESS_EMAIL_HEADER]: "staff.member@example.test" },
+    });
+
+    const requestLine = calls[1]!.args[0] as Record<string, unknown>;
+    expect(Object.keys(requestLine).sort()).toEqual(ALLOWLISTED_LOG_KEYS);
+    expect(requestLine.path).toBe(`/resume/${STORED_RESUME_KEY}`);
+    expect(requestLine.status).toBe(200);
+    expect(leakScanText(requestLine)).not.toContain("staff.member@example.test");
   });
 
   it("keeps /submit answering on a host that is not the resume host", async () => {
