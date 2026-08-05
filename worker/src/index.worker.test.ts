@@ -2,12 +2,20 @@ import {
   SELF,
   createExecutionContext,
   env,
+  fetchMock,
   waitOnExecutionContext,
 } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { buildFormData } from "../../src/submit";
+import type { ContactFormFields } from "../../src/schema";
+import consulting from "../fixtures/consulting.json";
+import generalQuestion from "../fixtures/general-question.json";
+import recruitmentHiring from "../fixtures/recruitment-hiring.json";
+import submitResume from "../fixtures/submit-resume.json";
 import worker from "./index";
 import { MAX_RESUME_BYTES, MAX_SUBMISSION_BODY_BYTES } from "./limits";
+import type { ZapierPayload } from "./payload";
 
 /**
  * Runtime tests for the Worker, executed inside workerd by
@@ -85,6 +93,39 @@ async function errorCodeOf(response: Response): Promise<string> {
   return body.error ?? "<no error key>";
 }
 
+const ZAPIER_ORIGIN = "https://hooks.test";
+const ZAPIER_PATH = "/catch/1/abcdef";
+
+type CapturedForward = {
+  body?: string;
+  headers?: Record<string, string>;
+};
+
+/**
+ * Intercept the single outbound call and capture what was actually sent.
+ *
+ * Activated for the WHOLE file, not per describe. `disableNetConnect` makes any
+ * unmatched request throw, so a test that forgets to mock Zapier fails loudly
+ * instead of quietly reaching the real network and passing for the wrong reason.
+ */
+beforeAll(() => {
+  fetchMock.activate();
+  fetchMock.disableNetConnect();
+});
+
+function interceptZapier(status = 200, replyBody = '{"status":"success"}') {
+  const captured: CapturedForward = {};
+  fetchMock
+    .get(ZAPIER_ORIGIN)
+    .intercept({ path: ZAPIER_PATH, method: "POST" })
+    .reply(status, (options) => {
+      captured.body = options.body as string;
+      captured.headers = options.headers as Record<string, string>;
+      return replyBody;
+    });
+  return captured;
+}
+
 describe("POST /submit - bodyless request (deploy probe P1 contract)", () => {
   /**
    * This exact signature is load-bearing OUTSIDE the test suite. The post-deploy
@@ -156,7 +197,10 @@ describe("POST /submit - server-side resume validation is authoritative", () => 
     await expect(errorCodeOf(response)).resolves.toBe("FILE_TOO_LARGE");
   });
 
-  it("accepts a file exactly at the limit rather than off by one", async () => {
+  /** Asserted as a full 200, not as "did not 413". A rejection-only suite is
+   * satisfied by an implementation that refuses everything. */
+  it("accepts a file of exactly the limit end to end", async () => {
+    interceptZapier();
     const atLimit = makeFile(
       "Jane-Doe-CV.pdf",
       "application/pdf",
@@ -165,8 +209,7 @@ describe("POST /submit - server-side resume validation is authoritative", () => 
     );
     const response = await postForm(resumeSubmission(atLimit));
 
-    expect(response.status).not.toBe(413);
-    await expect(errorCodeOf(response)).resolves.not.toBe("FILE_TOO_LARGE");
+    expect(response.status).toBe(200);
   });
 
   it("rejects a disallowed extension with 415 UNSUPPORTED_FILE_TYPE", async () => {
@@ -211,7 +254,8 @@ describe("POST /submit - server-side resume validation is authoritative", () => 
     await expect(errorCodeOf(response)).resolves.toBe("UNSUPPORTED_FILE_TYPE");
   });
 
-  it("accepts a real DOCX (ZIP container) as a supported type", async () => {
+  it("accepts a real DOCX (ZIP container) end to end", async () => {
+    interceptZapier();
     const docx = makeFile(
       "cv.docx",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -220,20 +264,30 @@ describe("POST /submit - server-side resume validation is authoritative", () => 
     );
     const response = await postForm(resumeSubmission(docx));
 
-    expect(response.status).not.toBe(415);
-    await expect(errorCodeOf(response)).resolves.not.toBe(
-      "UNSUPPORTED_FILE_TYPE",
-    );
+    expect(response.status).toBe(200);
   });
 
-  it("accepts a real legacy DOC (OLE2 container) as a supported type", async () => {
+  it("accepts a real legacy DOC (OLE2 container) end to end", async () => {
+    interceptZapier();
     const doc = makeFile("cv.doc", "application/msword", OLE2_MAGIC, 2048);
     const response = await postForm(resumeSubmission(doc));
 
-    expect(response.status).not.toBe(415);
-    await expect(errorCodeOf(response)).resolves.not.toBe(
-      "UNSUPPORTED_FILE_TYPE",
-    );
+    expect(response.status).toBe(200);
+  });
+
+  /**
+   * A file with no reported MIME type is common on some operating systems, and
+   * multipart re-encodes that empty type as `application/octet-stream`. So the
+   * widget validates "" and the Worker receives "application/octet-stream" for
+   * the identical file. Refusing it server-side accepts the upload in the form
+   * and then drops it - silent lead loss for a whole class of users.
+   */
+  it("accepts a file whose MIME type the browser could not determine", async () => {
+    interceptZapier();
+    const untyped = makeFile("cv.pdf", "", PDF_MAGIC, 2048);
+    const response = await postForm(resumeSubmission(untyped));
+
+    expect(response.status).toBe(200);
   });
 
   it("rejects a Submit Resume with no file at all as 400 INVALID_SUBMISSION", async () => {
@@ -329,7 +383,8 @@ describe("POST /submit - Content-Length is an optimization, measured size is the
    * rejected every one of them - a silent refusal at precisely the size the UI
    * tells candidates is allowed.
    */
-  it("does not fast-reject a resume sent at exactly the documented limit", async () => {
+  it("delivers a resume sent at exactly the documented limit", async () => {
+    interceptZapier();
     const atLimit = makeFile(
       "Jane-Doe-CV.pdf",
       "application/pdf",
@@ -338,7 +393,7 @@ describe("POST /submit - Content-Length is an optimization, measured size is the
     );
     const response = await postForm(resumeSubmission(atLimit));
 
-    expect(response.status).not.toBe(413);
+    expect(response.status).toBe(200);
   });
 });
 
@@ -513,6 +568,365 @@ describe("POST /submit - storage failure", () => {
 
     expect(response.status).toBe(502);
     await expect(errorCodeOf(response)).resolves.toBe("STORAGE_FAILED");
+  });
+});
+
+function headerValue(
+  headers: Record<string, string> | undefined,
+  name: string,
+): string {
+  const entries = Object.entries(headers ?? {});
+  const hit = entries.find(
+    ([key]) => key.toLowerCase() === name.toLowerCase(),
+  );
+  return hit?.[1] ?? "";
+}
+
+/** Rebuild the widget form state that produced a fixture, so the sample data
+ * lives only in the fixture file. Mirrors the frozen contract test's helper. */
+function widgetFieldsFor(
+  fixture: ZapierPayload,
+  resume: File | null,
+): ContactFormFields {
+  return {
+    inquiryType: fixture.inquiryType as ContactFormFields["inquiryType"],
+    firstName: fixture.firstName,
+    lastName: fixture.lastName,
+    workEmail: fixture.workEmail,
+    title: fixture.title,
+    company: fixture.company,
+    phone: fixture.phone,
+    companySize: fixture.companySize,
+    estimatedBudget: fixture.estimatedBudget,
+    expectedTimeline: fixture.expectedTimeline,
+    message: fixture.message,
+    resume,
+    website: "",
+  };
+}
+
+function fixtureResumeFile(fixture: ZapierPayload): File | null {
+  if (!fixture.resumeFileName) return null;
+  return new File(["%PDF-1.4 sample resume"], fixture.resumeFileName, {
+    type: "application/pdf",
+  });
+}
+
+function fixtureFormData(fixture: ZapierPayload): FormData {
+  return buildFormData(
+    widgetFieldsFor(fixture, fixtureResumeFile(fixture)),
+    fixture.source,
+  );
+}
+
+const FIXTURES: [string, ZapierPayload][] = [
+  ["general-question", generalQuestion as ZapierPayload],
+  ["consulting", consulting as ZapierPayload],
+  ["recruitment-hiring", recruitmentHiring as ZapierPayload],
+  ["submit-resume", submitResume as ZapierPayload],
+];
+
+describe("POST /submit - forwards flat JSON to Zapier, never multipart", () => {
+  afterEach(() => fetchMock.assertNoPendingInterceptors());
+
+  /**
+   * THE ANTI-REGRESSION TEST FOR THE BUG THAT COST THIS PROJECT EVERY LEAD.
+   *
+   * Zapier does not accept multipart/form-data. It DISCARDS the body and still
+   * answers HTTP 200, so a multipart forward looks perfectly healthy while every
+   * submission is dropped. Nothing about the response can reveal that.
+   *
+   * So the assertion is on the bytes we sent, compared against the golden
+   * fixtures, which are the artifact the backend team maps their Zap from. Only
+   * `submittedAt` and `resumeUrl` are substituted, because only those two are
+   * legitimately non-deterministic - and both are read from the stored object
+   * and from configuration, never copied out of the body under test.
+   *
+   * A serialization that drops a key, adds a sixteenth, reorders the contract or
+   * silently becomes multipart cannot survive this comparison.
+   */
+  it.each(FIXTURES)(
+    "sends %s byte-for-byte as the frozen fixture",
+    async (_name, fixture) => {
+      const captured = interceptZapier();
+
+      const before = Date.now();
+      const response = await postForm(fixtureFormData(fixture));
+      const after = Date.now();
+      expect(response.status).toBe(200);
+
+      let resumeUrl = "";
+      let submittedAt: string;
+      if (fixture.resumeFileName) {
+        // Independent source: the timestamp written into R2 metadata. Matching
+        // it here also proves the stored object and the forwarded lead describe
+        // the same instant.
+        const { key, metadata } = await storedObject();
+        resumeUrl = `${env.RESUME_URL_BASE}/${key}`;
+        submittedAt = metadata.submittedAt!;
+      } else {
+        submittedAt = (JSON.parse(captured.body!) as ZapierPayload).submittedAt;
+      }
+
+      // Whichever source it came from, it must be a real instant produced by
+      // THIS request. That window is what stops the substitution below from
+      // rubber-stamping whatever the Worker happened to send.
+      expect(Date.parse(submittedAt)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(submittedAt)).toBeLessThanOrEqual(after);
+
+      const expected = { ...fixture, resumeUrl, submittedAt };
+      expect(captured.body).toBe(JSON.stringify(expected));
+    },
+  );
+
+  it("labels the outbound body as JSON and never as multipart", async () => {
+    const captured = interceptZapier();
+
+    await postForm(resumeSubmission());
+
+    const contentType = headerValue(captured.headers, "content-type");
+    expect(contentType).toContain("application/json");
+    expect(contentType).not.toContain("multipart");
+  });
+
+  it("carries no file bytes and no multipart part headers in the body", async () => {
+    const captured = interceptZapier();
+
+    await postForm(resumeSubmission());
+
+    expect(captured.body).not.toContain("%PDF");
+    expect(captured.body).not.toContain("Content-Disposition");
+    expect(captured.body).not.toContain("filename=");
+  });
+
+  it("carries all 15 contract keys in the frozen order", async () => {
+    const captured = interceptZapier();
+
+    await postForm(fixtureFormData(submitResume as ZapierPayload));
+
+    expect(Object.keys(JSON.parse(captured.body!))).toEqual(
+      Object.keys(submitResume),
+    );
+  });
+
+  /**
+   * The Zap filters on this header. Without it, anyone who scraped the hook URL
+   * from the old public embed can still post forged leads straight into it.
+   * It travels as a HEADER precisely so the 15-key body stays frozen.
+   */
+  it("authenticates itself with the shared secret in a header", async () => {
+    const captured = interceptZapier();
+
+    await postForm(resumeSubmission());
+
+    expect(headerValue(captured.headers, "x-aag-worker-auth")).toBe(
+      env.ZAPIER_SHARED_SECRET,
+    );
+  });
+
+  it("keeps the shared secret out of the body", async () => {
+    const captured = interceptZapier();
+
+    await postForm(resumeSubmission());
+
+    expect(captured.body).not.toContain(env.ZAPIER_SHARED_SECRET);
+  });
+});
+
+describe("POST /submit - 2xx only when storage AND forwarding both succeed", () => {
+  afterEach(() => fetchMock.assertNoPendingInterceptors());
+
+  it("answers 200 with ok:true and the resume URL when both succeed", async () => {
+    interceptZapier();
+
+    const response = await postForm(resumeSubmission());
+    const body = (await response.json()) as {
+      ok?: boolean;
+      resumeUrl?: string;
+    };
+    const { key } = await storedObject();
+
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.resumeUrl).toBe(`${env.RESUME_URL_BASE}/${key}`);
+  });
+
+  it("builds the resume URL from configuration, with no hostname in the source", async () => {
+    interceptZapier();
+
+    const response = await postForm(resumeSubmission());
+    const body = (await response.json()) as { resumeUrl?: string };
+
+    expect(body.resumeUrl?.startsWith(env.RESUME_URL_BASE)).toBe(true);
+  });
+
+  /**
+   * Spec, and deliberately not "fixed" later: the orphaned object is an ACCEPTED
+   * cost. Returning success while the lead is lost is the failure this change
+   * exists to eliminate, so the request fails and the file simply stays.
+   */
+  it("answers 502 FORWARD_FAILED and KEEPS the stored object when Zapier rejects", async () => {
+    interceptZapier(500, "upstream exploded");
+
+    const response = await postForm(resumeSubmission());
+
+    expect(response.status).toBe(502);
+    await expect(errorCodeOf(response)).resolves.toBe("FORWARD_FAILED");
+    const listing = await env.RESUMES.list();
+    expect(listing.objects).toHaveLength(1);
+  });
+
+  it("answers 502 FORWARD_FAILED when Zapier answers a non-2xx redirect-ish status", async () => {
+    interceptZapier(404, "no such hook");
+
+    const response = await postForm(resumeSubmission());
+
+    expect(response.status).toBe(502);
+    await expect(errorCodeOf(response)).resolves.toBe("FORWARD_FAILED");
+  });
+
+  /**
+   * Ordering proof. No interceptor is registered here, so any outbound call
+   * would be refused by disableNetConnect and surface as FORWARD_FAILED.
+   * Getting STORAGE_FAILED back is what proves Zapier was never contacted.
+   */
+  it("never contacts Zapier when the R2 put fails", async () => {
+    const failingBucket = {
+      put: () => Promise.reject(new Error("r2 unavailable")),
+    } as unknown as R2Bucket;
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      { ...env, RESUMES: failingBucket },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(502);
+    await expect(errorCodeOf(response)).resolves.toBe("STORAGE_FAILED");
+  });
+});
+
+describe("logging never leaks a secret", () => {
+
+  const SECRETS = () => [
+    env.ZAPIER_HOOK_URL,
+    env.ZAPIER_SHARED_SECRET,
+    env.ERASURE_SALT,
+  ];
+
+  function captureConsole() {
+    const lines: string[] = [];
+    const record = (...args: unknown[]) => {
+      lines.push(args.map((a) => JSON.stringify(a) ?? String(a)).join(" "));
+    };
+    for (const method of ["log", "info", "warn", "error", "debug"] as const) {
+      vi.spyOn(console, method).mockImplementation(record);
+    }
+    return lines;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fetchMock.assertNoPendingInterceptors();
+  });
+
+  /**
+   * The presence half. "No secret appeared in the logs" is trivially true of a
+   * Worker that logs nothing at all, so this asserts the allowlisted line IS
+   * emitted and carries exactly the permitted keys.
+   */
+  it("emits one allowlisted log line per request", async () => {
+    const lines = captureConsole();
+    interceptZapier();
+
+    await postForm(resumeSubmission());
+
+    expect(lines).toHaveLength(1);
+    const logged = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(Object.keys(logged).sort()).toEqual([
+      "durationMs",
+      "errorCode",
+      "origin",
+      "path",
+      "requestId",
+      "status",
+    ]);
+    expect(logged.path).toBe("/submit");
+    expect(logged.status).toBe(200);
+  });
+
+  it("records the received Origin so a misconfigured allowlist is diagnosable", async () => {
+    const lines = captureConsole();
+    interceptZapier();
+
+    await SELF.fetch(`${ORIGIN}/submit`, {
+      method: "POST",
+      body: resumeSubmission(),
+      headers: { Origin: "https://wrong-origin.test" },
+    });
+
+    expect(JSON.parse(lines[0]!).origin).toBe("https://wrong-origin.test");
+  });
+
+  /**
+   * The absence half, driven across EVERY error path rather than one of them.
+   */
+  it("leaks no secret while driving every error path", async () => {
+    const lines = captureConsole();
+
+    // 400 - unparseable body
+    await SELF.fetch(`${ORIGIN}/submit`, { method: "POST" });
+    // 413 - measured size
+    await postForm(
+      resumeSubmission(
+        makeFile("cv.pdf", "application/pdf", PDF_MAGIC, MAX_RESUME_BYTES + 1),
+      ),
+    );
+    // 415 - bytes are not a supported container
+    await postForm(
+      resumeSubmission(makeFile("cv.pdf", "application/pdf", EXE_MAGIC, 512)),
+    );
+    // 404 - unknown route
+    await SELF.fetch(`${ORIGIN}/nope`);
+    // 502 - forward rejected
+    interceptZapier(500, "upstream exploded");
+    await postForm(resumeSubmission());
+
+    expect(lines.length).toBeGreaterThanOrEqual(5);
+    const output = lines.join("\n");
+    for (const secret of SECRETS()) {
+      expect(secret.length).toBeGreaterThan(0);
+      expect(output).not.toContain(secret);
+    }
+    expect(output).not.toContain("upstream exploded");
+    expect(output).not.toContain("x-aag-worker-auth");
+  });
+
+  it("leaks no secret when the R2 put throws", async () => {
+    const lines = captureConsole();
+    const failingBucket = {
+      put: () => Promise.reject(new Error(`boom ${env.ERASURE_SALT}`)),
+    } as unknown as R2Bucket;
+
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      { ...env, RESUMES: failingBucket },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    const output = lines.join("\n");
+    expect(output).toContain("STORAGE_FAILED");
+    expect(output).not.toContain(env.ERASURE_SALT);
   });
 });
 

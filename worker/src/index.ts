@@ -14,6 +14,7 @@
  *      cross-origin readable would be a PII leak.
  */
 
+import { toZapierPayload, type ZapierPayload } from "./payload";
 import {
   hasAllowedResumeExtension,
   hasAllowedResumeMagicBytes,
@@ -66,14 +67,25 @@ function corsHeaders(env: Env): Record<string, string> {
   };
 }
 
-function errorResponse(
+/**
+ * A response plus the enum member that produced it.
+ *
+ * The code travels separately instead of being re-read off the body so the
+ * single log line can name it without the router ever parsing its own output.
+ */
+type Routed = { response: Response; errorCode: ErrorCode | null };
+
+function fail(
   code: ErrorCode,
   extraHeaders: Record<string, string> = {},
-): Response {
-  return new Response(JSON.stringify({ ok: false, error: code }), {
-    status: ERROR_STATUS[code],
-    headers: { ...JSON_HEADERS, ...extraHeaders },
-  });
+): Routed {
+  return {
+    response: new Response(JSON.stringify({ ok: false, error: code }), {
+      status: ERROR_STATUS[code],
+      headers: { ...JSON_HEADERS, ...extraHeaders },
+    }),
+    errorCode: code,
+  };
 }
 
 /** Text fields every inquiry type must carry, whatever else it sends. */
@@ -229,6 +241,40 @@ async function storeResume(
 }
 
 /**
+ * Forward the flat contract payload to Zapier as JSON.
+ *
+ * NEVER multipart. Zapier does not accept multipart/form-data: it discards the
+ * body and still answers HTTP 200, so a multipart forward reports success while
+ * every lead is silently dropped. That is the bug this Worker exists to prevent,
+ * and the byte-comparison against the golden fixtures is what keeps it dead.
+ *
+ * The shared secret travels as a HEADER, not a body key. The Zap filters on it
+ * so a stranger who scraped the old public hook URL can no longer inject leads,
+ * and keeping it out of the body leaves the 15-key contract frozen.
+ *
+ * Failures collapse to `false`. The caught error is never logged, wrapped or
+ * returned: it can carry the hook URL and the request we just sent.
+ */
+async function forwardToZapier(
+  payload: ZapierPayload,
+  env: Env,
+): Promise<boolean> {
+  try {
+    const response = await fetch(env.ZAPIER_HOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-AAG-Worker-Auth": env.ZAPIER_SHARED_SECRET,
+      },
+      body: JSON.stringify(payload),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Handle a public form submission.
  *
  * A body that cannot be parsed as multipart — including no body at all, which is
@@ -236,23 +282,23 @@ async function storeResume(
  * mapping is a contract, not a convenience: the probe uses it to prove the
  * endpoint is reachable unauthenticated AND answered by this Worker.
  */
-async function handleSubmit(request: Request, env: Env): Promise<Response> {
+async function handleSubmit(request: Request, env: Env): Promise<Routed> {
   const cors = corsHeaders(env);
 
   if (declaredBodyExceedsCap(request)) {
-    return errorResponse("FILE_TOO_LARGE", cors);
+    return fail("FILE_TOO_LARGE", cors);
   }
 
   let formData: FormData;
   try {
     formData = await request.formData();
   } catch {
-    return errorResponse("INVALID_SUBMISSION", cors);
+    return fail("INVALID_SUBMISSION", cors);
   }
 
   for (const field of REQUIRED_TEXT_FIELDS) {
     if (readText(formData, field) === "") {
-      return errorResponse("INVALID_SUBMISSION", cors);
+      return fail("INVALID_SUBMISSION", cors);
     }
   }
 
@@ -266,11 +312,11 @@ async function handleSubmit(request: Request, env: Env): Promise<Response> {
     // Only the resume flow requires a file; the other inquiry types are
     // text-only and must keep working.
     if (readText(formData, "inquiryType") === RESUME_INQUIRY_TYPE) {
-      return errorResponse("INVALID_SUBMISSION", cors);
+      return fail("INVALID_SUBMISSION", cors);
     }
   } else {
     const rejection = await validateResume(file);
-    if (rejection !== null) return errorResponse(rejection, cors);
+    if (rejection !== null) return fail(rejection, cors);
 
     const result = await storeResume(
       file,
@@ -278,12 +324,59 @@ async function handleSubmit(request: Request, env: Env): Promise<Response> {
       submittedAt,
       env,
     );
-    if (typeof result === "string") return errorResponse(result, cors);
+    if (typeof result === "string") return fail(result, cors);
     stored = result;
   }
 
-  void stored;
-  return errorResponse("FORWARD_FAILED", cors);
+  const forwarded = await forwardToZapier(
+    toZapierPayload(formData, {
+      resumeUrl: stored.resumeUrl,
+      resumeFileName: stored.resumeFileName,
+      submittedAt,
+    }),
+    env,
+  );
+
+  // The stored object is deliberately NOT deleted here. An orphaned file is an
+  // accepted cost; answering 2xx while the lead is gone is not.
+  if (!forwarded) return fail("FORWARD_FAILED", cors);
+
+  return {
+    response: new Response(
+      JSON.stringify({ ok: true, resumeUrl: stored.resumeUrl }),
+      { status: 200, headers: { ...JSON_HEADERS, ...cors } },
+    ),
+    errorCode: null,
+  };
+}
+
+async function route(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Routed> {
+  if (url.pathname === "/submit") {
+    if (request.method === "OPTIONS") {
+      // Defensive only: the widget posts multipart, which is CORS-safelisted,
+      // so no preflight actually fires. Answering one anyway costs nothing and
+      // removes a failure mode if a future caller sends a custom header.
+      return {
+        response: new Response(null, {
+          status: 204,
+          headers: corsHeaders(env),
+        }),
+        errorCode: null,
+      };
+    }
+    if (request.method === "POST") {
+      return handleSubmit(request, env);
+    }
+  }
+
+  // Everything else, including /resume until its slice ships. A 404 here is
+  // the guarantee that the resume hostname cannot serve bytes before its
+  // Access gate exists.
+  return fail("NOT_FOUND");
 }
 
 export default {
@@ -292,23 +385,32 @@ export default {
     env: Env,
     _ctx: ExecutionContext,
   ): Promise<Response> {
+    const startedAt = Date.now();
     const url = new URL(request.url);
+    const { response, errorCode } = await route(request, env, url);
 
-    if (url.pathname === "/submit") {
-      if (request.method === "OPTIONS") {
-        // Defensive only: the widget posts multipart, which is CORS-safelisted,
-        // so no preflight actually fires. Answering one anyway costs nothing and
-        // removes a failure mode if a future caller sends a custom header.
-        return new Response(null, { status: 204, headers: corsHeaders(env) });
-      }
-      if (request.method === "POST") {
-        return handleSubmit(request, env);
-      }
-    }
+    /**
+     * The ONLY log line this Worker emits, and its shape is an allowlist.
+     *
+     * Never add the hook URL, the shared secret, the erasure salt, a raw fetch
+     * error, a header collection or any submitted field to it. Those are the
+     * things that turn an observability line into a credential leak, and a
+     * runtime test drives every error path asserting none of them appear.
+     *
+     * `origin` is here on purpose: an ALLOWED_ORIGIN mismatch still delivers the
+     * lead but hides the response from the page, so the user retries and we get
+     * duplicates plus a false failure report. Without this field that
+     * misconfiguration is invisible.
+     */
+    console.log({
+      requestId: crypto.randomUUID(),
+      path: url.pathname,
+      status: response.status,
+      errorCode,
+      origin: request.headers.get("Origin") ?? "",
+      durationMs: Date.now() - startedAt,
+    });
 
-    // Everything else, including /resume until its slice ships. A 404 here is
-    // the guarantee that the resume hostname cannot serve bytes before its
-    // Access gate exists.
-    return errorResponse("NOT_FOUND");
+    return response;
   },
 };

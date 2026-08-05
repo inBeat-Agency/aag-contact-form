@@ -82,13 +82,23 @@ export function hasAllowedResumeExtension(fileName: string): boolean {
 }
 
 /**
- * An EMPTY MIME type is allowed on purpose. Some operating systems and browsers
- * report no type at all for a legitimate `.doc`, so treating empty as a
- * rejection would refuse real resumes. The extension and the magic bytes carry
- * the decision in that case.
+ * MIME types that mean "nobody could work out what this is", both of which are
+ * accepted rather than refused.
+ *
+ * Some operating systems and browsers report no type at all for a legitimate
+ * `.doc` or `.pdf`. That empty string does NOT survive the wire: multipart
+ * encodes an untyped part as `application/octet-stream`, so the widget sees ""
+ * and the Worker sees `application/octet-stream` for the very same file.
+ *
+ * Treating either as a rejection means the form accepts a candidate's resume and
+ * the server then refuses it - silent lead loss for everyone whose OS is quiet
+ * about MIME types. The extension and the magic bytes carry the decision here;
+ * neither is relaxed by this.
  */
+const UNDETERMINED_MIME_TYPES = ["", "application/octet-stream"];
+
 export function isAllowedResumeMimeType(mimeType: string): boolean {
-  if (mimeType === "") return true;
+  if (UNDETERMINED_MIME_TYPES.includes(mimeType)) return true;
   return (ALLOWED_RESUME_MIME_TYPES as readonly string[]).includes(mimeType);
 }
 
