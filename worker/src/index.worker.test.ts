@@ -822,6 +822,53 @@ describe("POST /submit - the resume is persisted to R2 before anything else", ()
     expect(metadata.subjectHash?.toLowerCase()).not.toContain("jane");
   });
 
+  /**
+   * W5. The four values were each asserted individually, which says nothing
+   * about what else might be on the object: adding `workEmail` to
+   * `customMetadata` would have kept every one of those tests green while the
+   * raw candidate address was written onto every CV we store.
+   *
+   * The key set is therefore asserted as a WHOLE. A new key is a deliberate
+   * decision about PII, and it should have to be made here.
+   */
+  it("stores exactly the four agreed metadata keys and nothing else", async () => {
+    interceptZapier();
+    await postForm(resumeSubmission());
+
+    const { metadata } = await storedObject();
+    expect(Object.keys(metadata).sort()).toEqual([
+      "originalFileName",
+      "subjectHash",
+      "submissionId",
+      "submittedAt",
+    ]);
+  });
+
+  /**
+   * The point of the salted HMAC is that erasure works without the address ever
+   * being stored. That guarantee is only real if nothing else on the object
+   * carries it - in a key, in a value, in any casing.
+   */
+  it("writes the candidate's work email into no metadata key or value", async () => {
+    interceptZapier();
+    await postForm(resumeSubmission());
+
+    const { metadata } = await storedObject();
+    const flattened = Object.entries(metadata)
+      .flat()
+      .join("\n")
+      .toLowerCase();
+
+    for (const fragment of [
+      "jane.doe@example.com",
+      "jane.doe",
+      "@example.com",
+      "workemail",
+    ]) {
+      expect(flattened).not.toContain(fragment);
+    }
+  });
+
   it("stores nothing when validation rejects the submission", async () => {
     const exe = makeFile("resume.exe", "application/pdf", PDF_MAGIC, 2048);
     const response = await postForm(resumeSubmission(exe));
