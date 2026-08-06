@@ -11,6 +11,14 @@
 name = "aag-contact-form-worker"
 main = "src/index.ts"
 
+# Pinned ON PURPOSE. This Cloudflare account is shared across several client
+# projects, and the deploying identity can see more than one account. Without
+# this line `wrangler deploy` either fails asking which account to use, or -
+# worse - silently follows a CLOUDFLARE_ACCOUNT_ID environment variable and
+# deploys someone else's project into the wrong place. Ambiguity here is not
+# worth the convenience of omitting it.
+account_id = "0562da4b8c54413c6043de4508c0ba64"
+
 # Must not exceed the date the INSTALLED workerd supports, or every test in the
 # worker suite silently runs against different runtime semantics than a deploy
 # would get - miniflare falls back with a warning nobody reads and CI calls it
