@@ -4,36 +4,44 @@ A standalone, embeddable **Contact Us** form for the Alpha Apex Group Webflow
 site. It is a single React app compiled to one self-mounting IIFE bundle. CSS is
 injected at runtime, so embedding requires only one `<div>` and one `<script>`.
 
-> ## ⚠️ Interim state — staging only, resumes are NOT stored
+> ## ⚠️ The widget now talks to the Worker, and the Worker is not deployed yet
 >
-> The Cloudflare Worker described further down **does not exist yet**. Until it
-> does, the widget POSTs **directly to the Zapier Catch Hook** as
-> `application/x-www-form-urlencoded`, running the Worker's own transform
-> (`worker/src/payload.ts`) client-side.
+> The interim transport is gone. The widget POSTs **multipart to the Cloudflare
+> Worker**, which stores the resume and forwards flat JSON to Zapier. Nothing in
+> this repo posts to the Zapier hook any more.
 >
-> | | Status |
+> **The endpoint has not been repointed.** `data-endpoint` in the Webflow embed
+> still points at the Zapier Catch Hook, and Zapier does not answer `ok: true`,
+> so **every submission currently renders the error panel**. That is the correct
+> behaviour, not a bug: the widget refuses to claim success it cannot verify.
+> The form is not delivering leads until the cutover below runs.
+>
+> **Cutover — the one change that turns it back on.** Deploy the Worker, then set
+> the embed attribute to the Worker's submit hostname:
+>
+> ```html
+> data-endpoint="https://<submit-host>/submit"
+> ```
+>
+> It is a runtime attribute in the Webflow embed, so this needs no code deploy
+> and no rebuild. See [Cutover checklist](#cutover-checklist) for the full order.
+>
+> **Not done yet, and required before real candidates use this:**
+>
+> | Gate | State |
 > | --- | --- |
-> | General Question, Consulting, Recruitment / Hiring | ✅ fully functional end to end |
-> | Submit Resume | ⚠️ lead arrives, **the file does not** |
+> | Worker deployed + R2 bucket provisioned | ❌ not done |
+> | `data-endpoint` repointed at the Worker | ❌ not done — do NOT apply before the Worker is live |
+> | **Cloudflare Access on the resume hostname** | ❌ **not configured** |
+> | Old Zapier Catch Hook revoked | ❌ not done — the burned URL still accepts POSTs |
 >
-> A resume submission sends `resumeFileName` with the real file name and leaves
-> `resumeUrl` empty. That pair means *"a resume came in, the file is pending"* —
-> filter on it in Zapier and chase the candidate by email. **The uploaded file is
-> discarded by the browser and stored nowhere.** Do not tell the client resumes
-> are being collected.
->
-> **Staging only. Do not point production at this.** Two reasons: the hook URL
-> sits in `data-endpoint` in the page source where anyone can read and POST to
-> it, and Zapier bills per task, so anyone who finds it can spend the client's
-> quota.
->
-> **A 200 from Zapier is still not proof of delivery.** Zapier answers `200` with
-> `{"status":"success"}` even for bodies it throws away. Verify leads in the Zap
-> history, never in the browser's network tab.
->
-> Reverting to the target architecture is a small diff: drop the
-> `worker/src/payload` import in [`src/submit.ts`](./src/submit.ts) and post
-> `formData` again. The `TEMPORARY` comment block there explains every constraint.
+> **The Access gate is the one that matters most.** `GET /resume/<key>` has a
+> host lock in code, but **no authorization**: authorization is edge-side and
+> deliberately not implemented in the Worker. Until the Access application exists
+> on the resume hostname and probe P2 passes, that hostname must not be pointed
+> at this Worker with a non-blank `RESUME_HOST`, or stored CVs are world-readable
+> to anyone holding a key. A green local test suite proves the route works and
+> proves **nothing** about the gate — Miniflare cannot see Access.
 
 The form uses progressive disclosure in a single form (not a multi-step wizard).
 On the **Inquiry type** placeholder it previews the General Question field set
@@ -55,7 +63,8 @@ npm run test      # run the widget + Zapier payload contract tests (vitest)
 
 `npm run dev` serves `index.html`, which mounts the widget in a full-page panel
 and mocks the backend so submissions resolve locally (watch the console for the
-captured body — `URLSearchParams` today, `FormData` once the Worker lands).
+captured `FormData`). The mock answers `{"ok":true}` — a bare `200` would render
+the error panel, which is exactly the contract described below.
 
 ## Build output
 
@@ -179,14 +188,25 @@ https://aag-contact-form.pages.dev/aag-contact-form.js?v=<release-or-sha>
 
 ## API contract
 
-The table below is the **internal** shape the widget assembles with
-`buildFormData()`. It is the contract with the Cloudflare Worker and the input
-to the Zapier transform — but it is **not** what currently goes over the wire.
-Today that body is converted and sent as `application/x-www-form-urlencoded`
-(see [the interim notice](#️-interim-state--staging-only-resumes-are-not-stored)
-and [Zapier delivery](#zapier-delivery-why-a-worker-sits-in-the-middle)).
+The table below is the shape the widget assembles with `buildFormData()` and
+POSTs to the Worker as `multipart/form-data`, unchanged. It is the contract with
+the Worker; the Worker converts it into the flat 15-key Zapier payload (see
+[Zapier delivery](#zapier-delivery-why-a-worker-sits-in-the-middle)).
 
-A 2xx response is treated as success; anything else shows the error banner.
+**A 2xx is not success.** The widget renders the success panel only when the
+response is `response.ok` **AND** its body parses as a JSON object whose `ok` is
+exactly `true`:
+
+```jsonc
+{ "ok": true, "resumeUrl": "https://<resume-host>/resume/<uuid>" }
+```
+
+Anything else is an error: a non-JSON body, a non-object, `ok: false`, or a
+missing `ok`. Nothing defaults to success. This is deliberate — Zapier answers
+`200 {"status":"success"}` for bodies it throws away, and that shape is exactly
+the "valid JSON, no `ok` field" case now rejected. `resumeUrl` comes from the
+Worker and is never constructed in the browser.
+
 Requests time out after 60s by default to accommodate the permitted 10MB resume
 upload.
 
@@ -220,32 +240,62 @@ JSON or URL-encoded bodies. It **silently discards `multipart/form-data` and
 still answers HTTP 200** — so an unconverted submission looks successful to the
 widget while the lead is dropped on the floor.
 
-**Target architecture** — a Cloudflare Worker sits between the widget and Zapier
-and performs the conversion: it receives the multipart body, uploads the resume
-to object storage, and forwards flat JSON to the hook.
+**Architecture** — a Cloudflare Worker sits between the widget and Zapier and
+performs the conversion: it receives the multipart body, uploads the resume to
+R2, and forwards flat JSON to the hook. It answers 2xx only when **both** the
+upload and the forward succeed.
 
 ```text
 widget ──multipart──> Cloudflare Worker ──JSON──> Zapier Catch Hook
                              │
-                             └─ resume file ──> object storage (returns resumeUrl)
+                             └─ resume file ──> R2 (returns resumeUrl)
 ```
 
-**What actually runs today** — the Worker is paused, so the widget applies the
-transform itself and posts straight to the hook:
+The hook URL and the Zap's shared secret are **Worker secrets**. Neither appears
+in the bundle or the page source, so the widget can no longer be used to spend
+the client's Zapier task quota.
 
-```text
-widget ──url-encoded──> Zapier Catch Hook
-   │
-   └─ resume file ──> nowhere (only resumeFileName travels)
-```
+**Never set the `Content-Type` header by hand.** Only the browser knows the
+`multipart/form-data; boundary=…` value it generates for a `FormData` body; set
+the header yourself and the boundary is lost, so the Worker cannot parse a
+single field. Leaving it alone also keeps the request CORS-safelisted, so no
+preflight `OPTIONS` ever fires. `src/submit.test.ts` guards this explicitly, and
+it is the single most breakable line in the transport.
 
-Why URL-encoded and not JSON: `application/json` is **not** CORS-safelisted, so
-a browser fires a preflight `OPTIONS` that Zapier never answers. Zapier's docs
-say plainly *"do not set a custom Content-Type header."* Intersect that with
-Zapier's accepted body types (XML, JSON, URL-encoded) and exactly one option
-survives: `application/x-www-form-urlencoded`, which the browser sets by itself
-from a `URLSearchParams` body. **Never set that header by hand** — it is the one
-line that would break every submission in a real browser.
+### Cutover checklist
+
+Ordered. Every intermediate state is safe; running these out of order is not.
+
+1. Provision the R2 bucket and confirm it is **private** — `wrangler r2 bucket
+   dev-url get` reports disabled **and** `wrangler r2 bucket domain list` is
+   empty. Both. Either alone still serves CVs.
+2. Audit the zone for a covering Cloudflare Access application before creating
+   any new one. A wildcard app breaks the hostname-isolation assumption.
+3. Deploy the Worker and set its secrets (hook URL, shared secret, erasure salt).
+   All three are mandatory — a missing one fails the request loudly rather than
+   dropping the lead quietly.
+4. Create the Access application on the resume hostname, then set `RESUME_HOST`.
+   It ships blank on purpose, so `/resume` serves nothing until someone does.
+5. Run both deploy probes and require a positive signature from each:
+   - **P1** — an empty `POST /submit` must answer `400` with
+     `{"error":"INVALID_SUBMISSION"}`. Only our Worker can emit that string, so
+     no Access challenge can forge a pass.
+   - **P2** — an unauthenticated `GET /resume/<sentinel-uuid>` must return a
+     response containing `cloudflareaccess.com`. A `404` here means the gate is
+     missing, not that the key is unknown.
+6. Confirm `ALLOWED_ORIGIN` **equals** `document.location.origin` read from the
+   live mounted page. A mismatch still delivers and stores the lead — multipart
+   fires no preflight — but blocks the response, so the user sees an error and
+   retries. That produces duplicate leads plus a false failure report.
+7. **Only now** repoint `data-endpoint` at `https://<submit-host>/submit` and
+   send one real staging submission end to end.
+8. Delete the old Zapier Catch Hook and verify a direct POST to it now fails.
+   Until this step runs, the previously public hook URL still accepts forged
+   leads. Record the **new** hook URL in the runbook first — after this step the
+   rollback path must point at the new hook, not the burned one.
+
+Rollback is the same attribute: `data-endpoint` is runtime configuration in the
+Webflow embed, so pointing it elsewhere restores delivery without a code deploy.
 
 The transform is [`worker/src/payload.ts`](./worker/src/payload.ts). Its
 contract tests build their input with the widget's own `buildFormData()`, so a
@@ -323,7 +373,7 @@ src/
   schema.ts        # zod discriminated union + exported payload types (the contract)
   schema.test.ts   # vitest unit tests for the schema
   fields.tsx       # accessible field primitives (label/error/aria wiring)
-  submit.ts        # FormData builder + url-encoded Zapier POST (60s default timeout)
+  submit.ts        # FormData builder + multipart POST to the Worker (60s default timeout)
   ContactForm.tsx  # the form component (progressive disclosure, states, honeypot)
   main.tsx         # self-mounting entry point (reads data attributes)
   styles.css       # layout-only widget CSS (Webflow owns field/button visuals)
@@ -340,10 +390,16 @@ vite.config.ts     # single-file IIFE build (CSS injected by JS)
 `scripts/` is typechecked by `tsc -b` (via `tsconfig.worker.json`) and never
 enters `dist/aag-contact-form.js`.
 
-`worker/src/payload.ts` **is** in the bundle today, on purpose: the widget runs
-the Zapier transform client-side while the Worker is paused. It stays under
-`worker/` because that is where it belongs and where it will run — the path is
-the signal that this import is temporary. `src/bundle.test.ts` asserts the
-contract keys are present, so deleting the import to "fix the layering" turns
-the suite red instead of silently returning the widget to a body Zapier
-discards.
+`worker/` never enters `dist/aag-contact-form.js`, with exactly one exception:
+**`worker/src/limits.ts`**. The size, extension and MIME rules are shared on
+purpose — the widget validates for a good error message and the Worker
+re-validates as the authoritative check, and duplicating the numbers is how the
+two sides silently drift until the form accepts files the server rejects.
+
+`src/bundle.test.ts` enforces that as an **exact set**: the widget's production
+source graph may import `../worker/src/limits` and nothing else from `worker/`.
+The module is named literally, so any other cross-boundary import fails the test
+rather than shipping Worker code to the browser. It also scans the built bundle
+for the Zapier transform's server-only wire keys, and checks positively that the
+shared limits module really did ship — otherwise every absence assertion would
+also pass on a bundle containing no shared code at all.
