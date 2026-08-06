@@ -347,15 +347,62 @@ async function computeSubjectHash(email: string, salt: string): Promise<string> 
 }
 
 /**
- * Base for resume URLs, read from configuration.
+ * The one path `/resume` is served under.
+ *
+ * Declared HERE, above both users, because it has two: the router that answers
+ * downloads and the builder that emits the link staff click. Those two drifted
+ * apart once already — the builder emitted `<base>/<key>` while the router only
+ * ever answered `<base>/resume/<key>` — and every lead shipped with a link to a
+ * 404. One constant, read by both, is what makes that particular drift
+ * unrepresentable rather than merely tested for.
+ */
+const RESUME_PATH_PREFIX = "/resume/";
+
+/**
+ * The ORIGIN resume links are built on, or null when configuration cannot
+ * produce a link that resolves.
  *
  * There is deliberately NO source-level fallback hostname. Hostnames are
  * configuration; hardcoding one here would mean the pending domain migration
  * needs a code change, and a stale literal would hand staff links to the wrong
  * origin.
+ *
+ * What IS enforced here is that the configured value is an origin and nothing
+ * more. Letting the base carry its own path is precisely how the missing
+ * `/resume` shipped: the path lived in configuration on one deploy and in code
+ * on another, and neither side could tell which. An origin-only base means the
+ * path can only come from {@link RESUME_PATH_PREFIX}.
+ *
+ * It also refuses a base whose hostname is not the hostname `/resume` is served
+ * from. `RESUME_URL_BASE` says where the link points; `RESUME_HOST` says where
+ * downloads are answered. They describe one fact through two bindings, so they
+ * can disagree — and when they do, every emitted link is dead on arrival with
+ * nothing in the response to say so. A blank `RESUME_HOST` is left alone: that
+ * is an unconfigured deploy, not a contradiction, and failing the submission
+ * there would trade a dead link for a lost lead.
  */
-function resumeUrlBase(env: Env): string {
-  return (env.RESUME_URL_BASE ?? "").trim().replace(/\/+$/, "");
+function resumeUrlOrigin(env: Env): string | null {
+  const configured = (env.RESUME_URL_BASE ?? "").trim().replace(/\/+$/, "");
+  if (configured === "") return null;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(configured);
+  } catch {
+    return null;
+  }
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
+    return null;
+  }
+
+  const servingHost = (env.RESUME_HOST ?? "").trim().toLowerCase();
+  if (servingHost !== "" && parsed.hostname.toLowerCase() !== servingHost) {
+    return null;
+  }
+
+  return parsed.origin;
 }
 
 type StoredResume = { resumeUrl: string; resumeFileName: string };
@@ -373,8 +420,8 @@ async function storeResume(
   submittedAt: string,
   env: Env,
 ): Promise<StoredResume | ErrorCode> {
-  const base = resumeUrlBase(env);
-  if (base === "") return "STORAGE_FAILED";
+  const origin = resumeUrlOrigin(env);
+  if (origin === null) return "STORAGE_FAILED";
 
   const submissionId = crypto.randomUUID();
   const subjectHash = await computeSubjectHash(workEmail, env.ERASURE_SALT);
@@ -397,7 +444,10 @@ async function storeResume(
     return "STORAGE_FAILED";
   }
 
-  return { resumeUrl: `${base}/${submissionId}`, resumeFileName: file.name };
+  return {
+    resumeUrl: `${origin}${RESUME_PATH_PREFIX}${submissionId}`,
+    resumeFileName: file.name,
+  };
 }
 
 /**
@@ -525,8 +575,6 @@ async function handleSubmit(request: Request, env: Env): Promise<Routed> {
     errorCode: null,
   };
 }
-
-const RESUME_PATH_PREFIX = "/resume/";
 
 /**
  * Is this request arriving on the one hostname the Access application covers?

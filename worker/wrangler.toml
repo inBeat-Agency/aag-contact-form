@@ -64,6 +64,20 @@ ALLOWED_ORIGINS = "https://www.alphaapexgroup.com,https://alpha-apex-group.webfl
 # hostname. There is deliberately no source-level fallback: if this is missing
 # the Worker fails the request loudly instead of forwarding a lead whose CV link
 # points nowhere.
+#
+# ORIGIN ONLY - scheme and host, e.g. "https://resumes.example.com". Do NOT
+# append "/resume": the Worker owns that segment and reads it from the same
+# constant its router matches on. A base carrying its own path is REJECTED, and
+# it is rejected because the alternative already cost us: the segment lived in
+# configuration on the test deploy and in code on the real one, so each side
+# assumed the other supplied it and every live lead shipped a link to a 404.
+#
+# It must also name the SAME host as RESUME_HOST below. Those two bindings
+# describe one fact, so they can contradict each other; when they do, the link
+# is dead on arrival and nothing in the response says so. A mismatch is refused
+# rather than forwarded. (A blank RESUME_HOST is exempt - that is an
+# unconfigured deploy, not a contradiction, and failing there would trade a dead
+# link for a lost lead.)
 RESUME_URL_BASE = ""
 
 # The ONE hostname `GET /resume/<key>` will answer on, and the same hostname the

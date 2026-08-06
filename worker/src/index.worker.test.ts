@@ -49,6 +49,25 @@ declare module "cloudflare:test" {
 
 const ORIGIN = "https://worker.test";
 
+/**
+ * The resume link the contract promises, WRITTEN OUT BY HAND.
+ *
+ * Every character of this is a literal on purpose. It is not read from
+ * `env.RESUME_URL_BASE`, not joined with a separator the Worker also uses, and
+ * not produced by any expression the implementation evaluates.
+ *
+ * The bug this guards against shipped precisely because the assertion was
+ * `${env.RESUME_URL_BASE}/${key}` — the production formula, re-typed. A wrong
+ * formula then produced an equally wrong expectation and the comparison passed.
+ * Deriving an expectation from the thing under test proves the code agrees with
+ * itself, which is the one property no test needs to establish.
+ *
+ * If the miniflare bindings in `vitest.worker.config.ts` change, this constant
+ * must be updated BY HAND. That edit is the point: it forces someone to state
+ * the new contract deliberately instead of inheriting it silently.
+ */
+const EXPECTED_RESUME_URL_PREFIX = "https://resume-host.test/resume/";
+
 /** Leading bytes real files of each accepted type actually start with. */
 const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46]; // "%PDF"
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04]; // DOCX is a ZIP container
@@ -1297,6 +1316,64 @@ describe("POST /submit - storage failure", () => {
     expect(response.status).toBe(502);
     await expect(errorCodeOf(response)).resolves.toBe("STORAGE_FAILED");
   });
+
+  /**
+   * RESUME_URL_BASE says where the link points. RESUME_HOST says where `/resume`
+   * is answered. Two bindings, one fact — so they can contradict each other, and
+   * when they do EVERY emitted link is dead on arrival with nothing in the
+   * response to say so. That is the same silent-dead-link failure as the missing
+   * path segment, arriving through configuration instead of code.
+   *
+   * The suite itself shipped this contradiction for months: RESUME_HOST was
+   * `resume-host.test` while RESUME_URL_BASE was `https://resume.test/resume`,
+   * and 335 tests asserted links pointing at a host the router would refuse.
+   */
+  it("refuses to build a resume URL for a host that does not serve resumes", async () => {
+    const request = new Request(`${ORIGIN}/submit`, {
+      method: "POST",
+      body: resumeSubmission(),
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      request,
+      {
+        ...env,
+        RESUME_URL_BASE: "https://links-here.example.test",
+        RESUME_HOST: "but-served-here.example.test",
+      },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(502);
+    await expect(errorCodeOf(response)).resolves.toBe("STORAGE_FAILED");
+  });
+
+  /**
+   * The base is an ORIGIN and nothing else.
+   *
+   * Allowing it to carry a path is exactly how `/resume` went missing: the
+   * segment lived in configuration on the test deploy and in code on the real
+   * one, so neither side could tell which owned it and both assumed the other
+   * did. Rejecting a path here means {@link RESUME_PATH_PREFIX} is the only
+   * place it can come from.
+   */
+  it("refuses a RESUME_URL_BASE that carries its own path", async () => {
+    const request = new Request(`${ORIGIN}/submit`, {
+      method: "POST",
+      body: resumeSubmission(),
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      request,
+      { ...env, RESUME_URL_BASE: "https://resume-host.test/resume" },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(502);
+    await expect(errorCodeOf(response)).resolves.toBe("STORAGE_FAILED");
+  });
 });
 
 type MandatoryBinding =
@@ -1490,8 +1567,22 @@ describe("POST /submit - forwards flat JSON to Zapier, never multipart", () => {
    * So the assertion is on the bytes we sent, compared against the golden
    * fixtures, which are the artifact the backend team maps their Zap from. Only
    * `submittedAt` and `resumeUrl` are substituted, because only those two are
-   * legitimately non-deterministic - and both are read from the stored object
-   * and from configuration, never copied out of the body under test.
+   * legitimately non-deterministic.
+   *
+   * BE PRECISE ABOUT WHERE EACH SUBSTITUTION COMES FROM - this comment used to
+   * claim neither was "copied out of the body under test", and that was not
+   * true:
+   *
+   *   - `resumeUrl` is a hand-written literal plus the key read back from R2.
+   *     Nothing the Worker computes contributes to it. It used to be rebuilt
+   *     with the production formula, which is how a link missing its `/resume`
+   *     segment passed this comparison all the way into a live deploy.
+   *   - `submittedAt` comes from R2 metadata when a resume was stored. For the
+   *     other three fixtures no object exists, so it IS read out of the captured
+   *     body - there is no second source to read it from. What stops that from
+   *     rubber-stamping itself is the window assertion below: the value must
+   *     parse to an instant inside the request it was produced by, so a frozen,
+   *     stale or fabricated timestamp still fails.
    *
    * A serialization that drops a key, adds a sixteenth, reorders the contract or
    * silently becomes multipart cannot survive this comparison.
@@ -1513,7 +1604,10 @@ describe("POST /submit - forwards flat JSON to Zapier, never multipart", () => {
         // it here also proves the stored object and the forwarded lead describe
         // the same instant.
         const { key, metadata } = await storedObject();
-        resumeUrl = `${env.RESUME_URL_BASE}/${key}`;
+        // Literal prefix + the opaque key read back from R2. The key is the
+        // only value taken from the system, and R2 is an independent source
+        // rather than the expression that built the URL.
+        resumeUrl = EXPECTED_RESUME_URL_PREFIX + key;
         submittedAt = metadata.submittedAt!;
       } else {
         submittedAt = (JSON.parse(captured.body!) as ZapierPayload).submittedAt;
@@ -1599,16 +1693,111 @@ describe("POST /submit - 2xx only when storage AND forwarding both succeed", () 
 
     expect(response.status).toBe(200);
     expect(body.ok).toBe(true);
-    expect(body.resumeUrl).toBe(`${env.RESUME_URL_BASE}/${key}`);
+    expect(body.resumeUrl).toBe(EXPECTED_RESUME_URL_PREFIX + key);
   });
 
+  /**
+   * Proves the hostname comes from configuration by BINDING A DIFFERENT ONE and
+   * requiring the emitted link to follow it.
+   *
+   * The previous version asserted `resumeUrl.startsWith(env.RESUME_URL_BASE)`,
+   * which a source-hardcoded hostname would also satisfy on any deploy where
+   * the two happened to match — and it read the expectation straight out of the
+   * binding under test. Relocating the host and asserting a literal is what
+   * actually distinguishes "read from config" from "baked into the source".
+   */
   it("builds the resume URL from configuration, with no hostname in the source", async () => {
     interceptZapier();
 
-    const response = await postForm(resumeSubmission());
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      {
+        ...env,
+        RESUME_URL_BASE: "https://relocated.example.test",
+        RESUME_HOST: "relocated.example.test",
+      },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(response.status).toBe(200);
+
+    const { key } = await storedObject();
     const body = (await response.json()) as { resumeUrl?: string };
 
-    expect(body.resumeUrl?.startsWith(env.RESUME_URL_BASE)).toBe(true);
+    expect(body.resumeUrl).toBe("https://relocated.example.test/resume/" + key);
+  });
+
+  /**
+   * THE LINK MUST LAND ON THE ROUTE THE WORKER ACTUALLY SERVES.
+   *
+   * The first remote deploy emitted `https://<base>/<key>` while the router only
+   * answers under `/resume/`, so every lead arrived carrying a 404. Storage was
+   * fine, the forward was fine, and 335 local tests were green — because the
+   * test rebuilt its expectation with the SAME expression as the implementation
+   * (`${env.RESUME_URL_BASE}/${key}`) and a wrong formula therefore produced a
+   * matching wrong expectation.
+   *
+   * So this expectation is a LITERAL, spelled out in full, taken from the
+   * published contract rather than computed by anything the Worker also runs.
+   * The only value read back from the system is the opaque key, and that comes
+   * from R2 — an independent source, not the expression under test. Change the
+   * path segment in the implementation and this test goes red; that is the
+   * entire point of writing it out by hand.
+   */
+  it("emits the resume URL under the literal /resume/ path", async () => {
+    const captured = interceptZapier();
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      {
+        ...env,
+        RESUME_URL_BASE: "https://resume.example.test",
+        RESUME_HOST: "resume.example.test",
+      },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(response.status).toBe(200);
+
+    const { key } = await storedObject();
+    const expected = "https://resume.example.test/resume/" + key;
+
+    const body = (await response.json()) as { resumeUrl?: string };
+    expect(body.resumeUrl).toBe(expected);
+    expect((JSON.parse(captured.body!) as ZapierPayload).resumeUrl).toBe(
+      expected,
+    );
+  });
+
+  /**
+   * The end-to-end oracle no formula can fake: take the link the Worker just
+   * emitted, ask the Worker for it, and require the candidate's bytes back.
+   *
+   * This asserts nothing about how the URL is built, so it cannot be satisfied
+   * by agreeing with a broken construction. It fails if the path segment is
+   * wrong, and it fails if the emitted host is not the host the `/resume`
+   * host-lock admits — the second defect the literal test above cannot see.
+   */
+  it("emits a link that resolves to the stored bytes when fetched", async () => {
+    interceptZapier();
+
+    const response = await postForm(resumeSubmission());
+    const { resumeUrl: emitted } = (await response.json()) as {
+      resumeUrl?: string;
+    };
+
+    const download = await probeResume(emitted!);
+
+    expect(download.status).toBe(200);
+    expect(download.bytes.slice(0, PDF_MAGIC.length)).toEqual(PDF_MAGIC);
   });
 
   /**
@@ -2491,7 +2680,9 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       ok: true,
-      resumeUrl: expect.stringMatching(/^https:\/\/resume\.test\/resume\/[0-9a-f-]{36}$/),
+      resumeUrl: expect.stringMatching(
+        /^https:\/\/resume-host\.test\/resume\/[0-9a-f-]{36}$/,
+      ),
     });
   });
 });

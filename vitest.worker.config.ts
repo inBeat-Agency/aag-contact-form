@@ -43,7 +43,17 @@ export default defineWorkersConfig({
             // Deliberately NOT the host the suite posts submissions to. The
             // /resume host lock is only observable when the two differ.
             RESUME_HOST: "resume-host.test",
-            RESUME_URL_BASE: "https://resume.test/resume",
+            // ORIGIN ONLY, and the SAME host RESUME_HOST serves.
+            //
+            // This value used to be "https://resume.test/resume": a different
+            // host, with the /resume segment smuggled into configuration. That
+            // is what hid the missing-/resume bug — the implementation appended
+            // only "/<key>", the fixture supplied the rest, and the suite saw a
+            // correct-looking URL that production could never produce. It also
+            // meant every asserted link pointed at a host the /resume host lock
+            // would have rejected. The path now comes from the Worker, and the
+            // two bindings agree, so the emitted link can be fetched back.
+            RESUME_URL_BASE: "https://resume-host.test",
             ZAPIER_HOOK_URL: "https://hooks.test/catch/1/abcdef",
             ZAPIER_SHARED_SECRET: "test-shared-secret-4f2a9c",
             ERASURE_SALT: "test-erasure-salt-91b7de",
