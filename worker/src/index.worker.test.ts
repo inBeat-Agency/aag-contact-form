@@ -13,7 +13,7 @@ import consulting from "../fixtures/consulting.json";
 import generalQuestion from "../fixtures/general-question.json";
 import recruitmentHiring from "../fixtures/recruitment-hiring.json";
 import submitResume from "../fixtures/submit-resume.json";
-import worker from "./index";
+import worker, { type Env } from "./index";
 import {
   INQUIRY_TYPES,
   MAX_FILE_NAME_BYTES,
@@ -41,6 +41,8 @@ declare module "cloudflare:test" {
     ALLOWED_ORIGINS: string;
     RESUME_HOST: string;
     RESUME_URL_BASE: string;
+    RESUME_AUTH_USER: string;
+    RESUME_AUTH_PASSWORD: string;
     ZAPIER_HOOK_URL: string;
     ZAPIER_SHARED_SECRET: string;
     ERASURE_SALT: string;
@@ -165,7 +167,7 @@ describe("POST /submit - bodyless request (deploy probe P1 contract)", () => {
    * the probe starts reporting a gated public form as healthy, which is a 100%
    * lead-loss failure shipped green. Hence its own test.
    */
-  it("answers 400 with exactly {\"ok\":false,\"error\":\"INVALID_SUBMISSION\"}", async () => {
+  it('answers 400 with exactly {"ok":false,"error":"INVALID_SUBMISSION"}', async () => {
     const response = await SELF.fetch(`${ORIGIN}/submit`, { method: "POST" });
 
     expect(response.status).toBe(400);
@@ -801,18 +803,21 @@ describe("POST /submit - the inquiry contract is enforced server-side", () => {
     expect(response.status).toBe(200);
   });
 
-  it.each(["not-an-email", "jane.doe@", "@example.com", "jane doe@x.com", "jane@example"])(
-    "refuses the unusable work email %p",
-    async (email) => {
-      const form = completeSubmission("General Question");
-      form.set("workEmail", email);
+  it.each([
+    "not-an-email",
+    "jane.doe@",
+    "@example.com",
+    "jane doe@x.com",
+    "jane@example",
+  ])("refuses the unusable work email %p", async (email) => {
+    const form = completeSubmission("General Question");
+    form.set("workEmail", email);
 
-      const response = await postForm(form);
+    const response = await postForm(form);
 
-      expect(response.status).toBe(400);
-      await expect(errorCodeOf(response)).resolves.toBe("INVALID_SUBMISSION");
-    },
-  );
+    expect(response.status).toBe(400);
+    await expect(errorCodeOf(response)).resolves.toBe("INVALID_SUBMISSION");
+  });
 
   /**
    * The rejection tests above are all satisfied by an implementation that
@@ -942,8 +947,10 @@ describe("POST /submit - Content-Length is an optimization, measured size is the
     );
     const form = resumeSubmission(oversized);
     const declaredBodyBytes = (
-      await new Request(`${ORIGIN}/submit`, { method: "POST", body: form })
-        .arrayBuffer()
+      await new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: form,
+      }).arrayBuffer()
     ).byteLength;
     expect(declaredBodyBytes).toBeGreaterThan(MAX_RESUME_BYTES);
     expect(declaredBodyBytes).toBeLessThan(MAX_SUBMISSION_BODY_BYTES);
@@ -992,7 +999,14 @@ function utf8Bytes(value: string): number {
 function maximalValidSubmission(): FormData {
   const form = new FormData();
   form.append("inquiryType", "Consulting");
-  for (const field of ["firstName", "lastName", "title", "company", "phone", "message"]) {
+  for (const field of [
+    "firstName",
+    "lastName",
+    "title",
+    "company",
+    "phone",
+    "message",
+  ]) {
     form.append(field, maximalText(MAX_TEXT_FIELD_BYTES));
   }
   const local = "a".repeat(MAX_TEXT_FIELD_BYTES - "@example.com".length);
@@ -1248,10 +1262,7 @@ describe("POST /submit - the resume is persisted to R2 before anything else", ()
     await postForm(resumeSubmission());
 
     const { metadata } = await storedObject();
-    const flattened = Object.entries(metadata)
-      .flat()
-      .join("\n")
-      .toLowerCase();
+    const flattened = Object.entries(metadata).flat().join("\n").toLowerCase();
 
     for (const fragment of [
       "jane.doe@example.com",
@@ -1377,9 +1388,7 @@ describe("POST /submit - storage failure", () => {
 });
 
 type MandatoryBinding =
-  | "ZAPIER_HOOK_URL"
-  | "ZAPIER_SHARED_SECRET"
-  | "ERASURE_SALT";
+  "ZAPIER_HOOK_URL" | "ZAPIER_SHARED_SECRET" | "ERASURE_SALT";
 
 /** `env` with one binding deleted outright, as an unset Worker secret arrives. */
 function envWithout(binding: MandatoryBinding): typeof env {
@@ -1409,7 +1418,11 @@ describe("POST /submit - a misconfigured deploy fails loudly, before any side ef
    *     failure becomes the gate that catches it.
    */
   const MISCONFIGURATIONS: [string, typeof env, string][] = [
-    ["ZAPIER_HOOK_URL omitted", envWithout("ZAPIER_HOOK_URL"), "FORWARD_FAILED"],
+    [
+      "ZAPIER_HOOK_URL omitted",
+      envWithout("ZAPIER_HOOK_URL"),
+      "FORWARD_FAILED",
+    ],
     [
       "ZAPIER_HOOK_URL blank",
       { ...env, ZAPIER_HOOK_URL: "" },
@@ -1504,9 +1517,7 @@ function headerValue(
   name: string,
 ): string {
   const entries = Object.entries(headers ?? {});
-  const hit = entries.find(
-    ([key]) => key.toLowerCase() === name.toLowerCase(),
-  );
+  const hit = entries.find(([key]) => key.toLowerCase() === name.toLowerCase());
   return hit?.[1] ?? "";
 }
 
@@ -1794,10 +1805,18 @@ describe("POST /submit - 2xx only when storage AND forwarding both succeed", () 
       resumeUrl?: string;
     };
 
-    const download = await probeResume(emitted!);
+    const download = await probeResume(emitted!, authed());
 
     expect(download.status).toBe(200);
     expect(download.bytes.slice(0, PDF_MAGIC.length)).toEqual(PDF_MAGIC);
+
+    // The same link, end to end, is USELESS to whoever intercepts it. The URL
+    // travels through Zapier, an inbox and a chat client before a staff member
+    // clicks it, so "the link resolves" and "the link is gated" are one journey
+    // and are asserted together rather than in two places that could drift.
+    const intercepted = await probeResume(emitted!);
+    expect(intercepted.status).toBe(401);
+    expect(intercepted.bytes.slice(0, PDF_MAGIC.length)).not.toEqual(PDF_MAGIC);
   });
 
   /**
@@ -1938,11 +1957,12 @@ const ALLOWLISTED_LOG_KEYS = [
 ];
 
 describe("logging never leaks a secret", () => {
-
   const SECRETS = () => [
     env.ZAPIER_HOOK_URL,
     env.ZAPIER_SHARED_SECRET,
     env.ERASURE_SALT,
+    env.RESUME_AUTH_USER,
+    env.RESUME_AUTH_PASSWORD,
   ];
 
   function scanText(calls: ConsoleCall[]): string {
@@ -2124,6 +2144,79 @@ describe("logging never leaks a secret", () => {
     expect(JSON.stringify(headers)).toBe("{}");
     expect(leakScanText(headers)).toContain(secret);
   });
+
+  /**
+   * THE RESUME CREDENTIAL, WHICH NOW TRAVELS ON EVERY GATED REQUEST.
+   *
+   * The three secrets above are read from bindings and only ever reach an
+   * outbound call. This one arrives in an INBOUND header on every single staff
+   * download, which makes `console.log(request.headers)` — or any well-meaning
+   * "log the request for debugging" — a direct credential leak.
+   *
+   * Scanning for the raw username and password is NOT sufficient and that is the
+   * whole reason this test is separate. The credential travels base64-encoded,
+   * so an implementation that echoed the `Authorization` header verbatim would
+   * emit `Basic dGVzdC1yZXN1bWUt…` — a string containing neither plaintext
+   * value. The encoded blob and the header name are therefore scanned for in
+   * their own right. This is the same shape as the #2454 finding, where the
+   * serializer, not the assertion, was what made the guard blind.
+   *
+   * Every /resume auth outcome is driven: accepted, rejected, and unconfigured.
+   */
+  describe("the /resume credential, which arrives inbound on every gated request", () => {
+    // Seeded in beforeAll, never inside the test: an R2 write performed in the
+    // body of an `it` cannot be popped off the isolated-storage stack and takes
+    // the whole file down with an error that hides every real assertion.
+    beforeAll(async () => {
+      await seedResume(STORED_RESUME_KEY);
+    });
+
+    it("leaks no resume credential while driving every /resume auth path", async () => {
+      const calls = captureConsole();
+
+      // Accepted — the only path that also writes an audit line.
+      await probeResume(
+        resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+        authed(),
+      );
+      // Rejected, credential present and wrong.
+      await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), {
+        headers: { Authorization: RESUME_BASIC_WRONG_PASSWORD },
+      });
+      // Rejected, no credential at all.
+      await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY));
+      // Wrong host, valid credential — must not echo it while refusing.
+      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY), authed());
+      // Unconfigured deploy, valid credential supplied. The body is drained
+      // unconditionally: an ungated response here carries a live R2 stream, and
+      // leaving one open aborts the whole file with an isolated-storage error
+      // that buries every assertion below.
+      const ctx = createExecutionContext();
+      const unconfigured = await worker.fetch(
+        new Request(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), authed()),
+        { ...env, RESUME_AUTH_PASSWORD: "" },
+        ctx,
+      );
+      await unconfigured.arrayBuffer();
+      await waitOnExecutionContext(ctx);
+
+      // Presence first: the runs above really did produce log output to scan.
+      expect(calls.length).toBeGreaterThanOrEqual(6);
+
+      const output = scanText(calls);
+      for (const secret of SECRETS()) {
+        expect(secret.length).toBeGreaterThan(0);
+        expect(output).not.toContain(secret);
+      }
+      // The transport forms, which contain neither plaintext value.
+      expect(output).not.toContain(
+        "dGVzdC1yZXN1bWUtdXNlcjp0ZXN0LXJlc3VtZS1wYXNzd29yZC03YzFlNWE=",
+      );
+      expect(output).not.toContain(RESUME_BASIC_WRONG_PASSWORD);
+      expect(output.toLowerCase()).not.toContain("authorization");
+      expect(output.toLowerCase()).not.toContain("basic ");
+    });
+  });
 });
 
 const REDIRECT_ORIGIN = "https://redirect-target.test";
@@ -2286,10 +2379,81 @@ async function probeResume(
   };
 }
 
-describe("GET /resume — route reachability (NOT authorization; Access is edge-side and invisible to Miniflare)", () => {
-  // These tests prove the ROUTE works. They prove NOTHING about the gate.
-  // Authorization is verified only by deploy probe P2 (§3 D-I). A green run
-  // here is fully consistent with the Access app never having been created.
+/**
+ * A valid `Authorization` header for the bound test credential, BASE64 WRITTEN
+ * OUT BY HAND.
+ *
+ * It is deliberately NOT built as `btoa(\`${env.RESUME_AUTH_USER}:${env.RESUME_AUTH_PASSWORD}\`)`.
+ * That expression is the production decode re-typed backwards: an implementation
+ * that split on the wrong character, or decoded latin1 instead of UTF-8, would
+ * be handed an input shaped by its own bug and would pass. The same defect class
+ * already shipped twice in this repo — once as a formula (`${RESUME_URL_BASE}/${key}`)
+ * and once as a fixture that smuggled `/resume` into a binding.
+ *
+ * The link between this literal and the bindings is asserted ONCE, explicitly,
+ * in "pins the test bindings this credential encodes". Editing either side
+ * without the other turns the suite red, which is the entire point.
+ */
+const RESUME_BASIC_HEADER =
+  "Basic dGVzdC1yZXN1bWUtdXNlcjp0ZXN0LXJlc3VtZS1wYXNzd29yZC03YzFlNWE=";
+
+/** Same shape, wrong password in the final character. */
+const RESUME_BASIC_WRONG_PASSWORD =
+  "Basic dGVzdC1yZXN1bWUtdXNlcjp0ZXN0LXJlc3VtZS1wYXNzd29yZC03YzFlNWI=";
+
+/** Same shape, wrong username in the final character. */
+const RESUME_BASIC_WRONG_USER =
+  "Basic dGVzdC1yZXN1bWUtdXNlczp0ZXN0LXJlc3VtZS1wYXNzd29yZC03YzFlNWE=";
+
+/**
+ * The same narrowing the Worker uses for the Cloudflare-only
+ * `crypto.subtle.timingSafeEqual`, which the DOM lib does not declare.
+ *
+ * This is the SAME OBJECT as `crypto.subtle` — a cast changes the type, not the
+ * reference — so a spy installed here is the spy the Worker's call hits.
+ */
+const timingSafeSubtle = crypto.subtle as unknown as {
+  timingSafeEqual(a: ArrayBuffer, b: ArrayBuffer): boolean;
+};
+
+/** Attach the valid credential without disturbing anything else in the init. */
+function authed(init: RequestInit = {}): RequestInit {
+  return {
+    ...init,
+    headers: {
+      ...(init.headers as Record<string, string> | undefined),
+      Authorization: RESUME_BASIC_HEADER,
+    },
+  };
+}
+
+/**
+ * An R2 binding that RECORDS every key it is asked for and refuses to serve one.
+ *
+ * The fail-closed tests must prove the Worker never reaches storage, and "no
+ * bytes came back" cannot prove that — a 401 emitted after a successful read
+ * looks identical from outside. This records the reads instead, and a companion
+ * test drives a real download through the same spy so the recorder is shown to
+ * work rather than assumed to.
+ */
+function recordingBucket(): { bucket: R2Bucket; reads: string[] } {
+  const reads: string[] = [];
+  return {
+    reads,
+    bucket: {
+      get: (key: string) => {
+        reads.push(key);
+        return Promise.resolve(null);
+      },
+    } as unknown as R2Bucket,
+  };
+}
+
+describe("GET /resume — route reachability and response contract", () => {
+  // Authorization is now enforced IN THIS WORKER (see the Basic Auth block
+  // below), so a green run here does prove the gate exists — unlike the
+  // Cloudflare Access model these tests were originally written against, which
+  // Miniflare structurally could not observe.
 
   beforeAll(async () => {
     await seedResume(STORED_RESUME_KEY);
@@ -2298,6 +2462,7 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
   it("streams the stored bytes on the configured resume host", async () => {
     const response = await SELF.fetch(
       resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+      authed(),
     );
 
     expect(response.status).toBe(200);
@@ -2318,7 +2483,10 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
    * the 404 can only come from the host check.
    */
   it("answers 404 NOT_FOUND for a retrievable key on a host that is not the configured one", async () => {
-    const response = await SELF.fetch(resumeUrl("worker.test", STORED_RESUME_KEY));
+    const response = await SELF.fetch(
+      resumeUrl("worker.test", STORED_RESUME_KEY),
+      authed(),
+    );
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({
@@ -2335,17 +2503,23 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
   it("locks onto whatever RESUME_HOST is bound to, not a hostname in source", async () => {
     const ctx = createExecutionContext();
     const served = await worker.fetch(
-      new Request(resumeUrl("alternate-resume.test", STORED_RESUME_KEY)),
+      new Request(
+        resumeUrl("alternate-resume.test", STORED_RESUME_KEY),
+        authed(),
+      ),
       { ...env, RESUME_HOST: "alternate-resume.test" },
       ctx,
     );
     await waitOnExecutionContext(ctx);
 
     expect(served.status).toBe(200);
-    await expect(bodyBytesOf(served)).resolves.toEqual([...STORED_RESUME_BYTES]);
+    await expect(bodyBytesOf(served)).resolves.toEqual([
+      ...STORED_RESUME_BYTES,
+    ]);
 
     const refused = await SELF.fetch(
       resumeUrl("alternate-resume.test", STORED_RESUME_KEY),
+      authed(),
     );
     expect(refused.status).toBe(404);
   });
@@ -2360,7 +2534,7 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
     for (const host of ["worker.test", "resume-host.test", "anything.test"]) {
       const ctx = createExecutionContext();
       const response = await worker.fetch(
-        new Request(resumeUrl(host, STORED_RESUME_KEY)),
+        new Request(resumeUrl(host, STORED_RESUME_KEY), authed()),
         { ...env, RESUME_HOST: "" },
         ctx,
       );
@@ -2377,6 +2551,7 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
   it("answers 404 NOT_FOUND for an unknown key on the configured host", async () => {
     const response = await SELF.fetch(
       resumeUrl(env.RESUME_HOST, "00000000-0000-4000-8000-000000000000"),
+      authed(),
     );
 
     expect(response.status).toBe(404);
@@ -2388,7 +2563,10 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
 
   it("answers 404 NOT_FOUND when no key follows /resume/", async () => {
     for (const path of ["/resume", "/resume/"]) {
-      const response = await SELF.fetch(`https://${env.RESUME_HOST}${path}`);
+      const response = await SELF.fetch(
+        `https://${env.RESUME_HOST}${path}`,
+        authed(),
+      );
 
       expect(response.status).toBe(404);
       await expect(response.json()).resolves.toEqual({
@@ -2444,6 +2622,7 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
   it("pins the complete header set of a successful download", async () => {
     const download = await probeResume(
       resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+      authed(),
     );
 
     expect(download.status).toBe(200);
@@ -2458,6 +2637,7 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
   it("hardens every successful download against being rendered inline", async () => {
     const download = await probeResume(
       resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+      authed(),
     );
 
     expect(download.header("X-Content-Type-Options")).toBe("nosniff");
@@ -2474,7 +2654,10 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
     await seedResume(docxKey, "Jane-Doe-CV.docx", docxType);
 
-    const download = await probeResume(resumeUrl(env.RESUME_HOST, docxKey));
+    const download = await probeResume(
+      resumeUrl(env.RESUME_HOST, docxKey),
+      authed(),
+    );
 
     expect(download.header("Content-Type")).toBe(docxType);
   });
@@ -2482,6 +2665,7 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
   it("offers the stored original filename as an attachment", async () => {
     const download = await probeResume(
       resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+      authed(),
     );
 
     expect(download.header("Content-Disposition")).toBe(
@@ -2503,7 +2687,10 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
       'ev"il\r\nX-Injected: yes\r\n\r\n<script>alert(1)</script>\\cv.pdf',
     );
 
-    const download = await probeResume(resumeUrl(env.RESUME_HOST, hostileKey));
+    const download = await probeResume(
+      resumeUrl(env.RESUME_HOST, hostileKey),
+      authed(),
+    );
 
     expect(download.header("Content-Disposition")).toBe(
       'attachment; filename="evilX-Injected: yes<script>alert(1)</script>cv.pdf"',
@@ -2523,7 +2710,10 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
     await seedResume(strippedKey, '"""');
 
     for (const key of [namelessKey, strippedKey]) {
-      const download = await probeResume(resumeUrl(env.RESUME_HOST, key));
+      const download = await probeResume(
+        resumeUrl(env.RESUME_HOST, key),
+        authed(),
+      );
 
       expect(download.status).toBe(200);
       expect(download.header("Content-Disposition")).toBe(
@@ -2538,14 +2728,21 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
    */
   it("emits no Access-Control-Allow-Origin on any /resume response", async () => {
     const probes = [
-      await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY)),
-      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY)),
+      await probeResume(
+        resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+        authed(),
+      ),
+      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY), authed()),
       await probeResume(
         resumeUrl(env.RESUME_HOST, "00000000-0000-4000-8000-000000000000"),
+        authed(),
       ),
       await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), {
         method: "POST",
       }),
+      // The auth challenge is a /resume response too, and it is the one an
+      // unauthenticated cross-origin page can actually provoke.
+      await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY)),
     ];
 
     for (const probe of probes) {
@@ -2553,17 +2750,20 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
     }
 
     // Proves the loop above actually covered a success AND the failure paths,
-    // rather than four responses that were all refused before any header ran.
-    expect(probes.map((probe) => probe.status)).toEqual([200, 404, 404, 404]);
+    // rather than five responses that were all refused before any header ran.
+    expect(probes.map((probe) => probe.status)).toEqual([
+      200, 404, 404, 404, 401,
+    ]);
   });
 
   it("pins the complete header set of every /resume 404", async () => {
     const refusals = [
-      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY)),
+      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY), authed()),
       await probeResume(
         resumeUrl(env.RESUME_HOST, "00000000-0000-4000-8000-000000000000"),
+        authed(),
       ),
-      await probeResume(`https://${env.RESUME_HOST}/resume/`),
+      await probeResume(`https://${env.RESUME_HOST}/resume/`, authed()),
     ];
 
     for (const refusal of refusals) {
@@ -2583,44 +2783,65 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
    * the subject is already identified by the key, and copying their email into
    * the log would spread the PII this route exists to protect.
    */
-  const AUDIT_LOG_KEYS = ["email", "key"];
+  /**
+   * TWO KEYS, AND `email` IS DELIBERATELY GONE.
+   *
+   * Under Cloudflare Access this line carried `Cf-Access-Authenticated-User-Email`,
+   * because Access authenticated a PERSON and then forgot them. Basic Auth
+   * authenticates a SHARED credential: there is no person to name. Keeping an
+   * `email` key would have meant writing `<no-access-identity>` on every single
+   * download — a field that looks like an alarm and is in fact the normal case,
+   * which is how a real alarm gets trained out of a team.
+   *
+   * `auth` records the fact that the read was authenticated and the mechanism
+   * that authenticated it, and claims nothing further. Per-person attribution is
+   * a known, accepted loss of this decision, not an oversight.
+   */
+  const AUDIT_LOG_KEYS = ["auth", "key"];
+
+  /** Left over from the superseded Access model; must never be echoed anywhere. */
   const ACCESS_EMAIL_HEADER = "Cf-Access-Authenticated-User-Email";
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("audits a successful download with the key and the Access identity", async () => {
+  it("audits a successful download with the key and the authentication method", async () => {
     const calls = captureConsole();
 
-    await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), {
-      headers: { [ACCESS_EMAIL_HEADER]: "staff.member@example.test" },
-    });
+    await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), authed());
 
     // Exactly two lines, in this order: the audit is written at the moment the
     // object is read, not assembled at the end where a later throw could skip
     // it, and the request line keeps its own untouched shape.
-    expect(loggedKeySets(calls)).toEqual([AUDIT_LOG_KEYS, ALLOWLISTED_LOG_KEYS]);
+    expect(loggedKeySets(calls)).toEqual([
+      AUDIT_LOG_KEYS,
+      ALLOWLISTED_LOG_KEYS,
+    ]);
     expect(calls[0]!.args[0]).toEqual({
       key: STORED_RESUME_KEY,
-      email: "staff.member@example.test",
+      auth: "basic",
     });
   });
 
   /**
-   * On a hostname that is supposed to be gated, a download with no Access
-   * identity is not a formatting nicety - it means the request reached the
-   * Worker without passing Access, which is the C1 failure. It gets a loud,
-   * greppable marker rather than an empty string that reads like a blank field.
+   * AN UNAUTHENTICATED 200 IS STRUCTURALLY IMPOSSIBLE, and this is the runtime
+   * half of that claim.
+   *
+   * The compile-time half is that `handleResumeDownload` cannot be called
+   * without a `ResumeAuthGrant`, and the only expression in the file that
+   * produces one sits behind the constant-time comparison. So `auth: "basic"`
+   * is not a label the audit chooses — it is read off the proof that let the
+   * download happen at all. A download with no grant does not log differently;
+   * it does not compile.
    */
-  it("marks a download as unattributable when Access sent no identity", async () => {
+  it("never emits an audit line for a request that was not authenticated", async () => {
     const calls = captureConsole();
 
-    await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY));
+    const challenged = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+    );
 
-    expect(loggedKeySets(calls)).toEqual([AUDIT_LOG_KEYS, ALLOWLISTED_LOG_KEYS]);
-    expect(calls[0]!.args[0]).toEqual({
-      key: STORED_RESUME_KEY,
-      email: "<no-access-identity>",
-    });
+    expect(challenged.status).toBe(401);
+    expect(loggedKeySets(calls)).toEqual([ALLOWLISTED_LOG_KEYS]);
   });
 
   /**
@@ -2631,19 +2852,22 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
     const calls = captureConsole();
 
     const refusals = [
-      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY), {
-        headers: { [ACCESS_EMAIL_HEADER]: "staff.member@example.test" },
-      }),
+      await probeResume(resumeUrl("worker.test", STORED_RESUME_KEY), authed()),
       await probeResume(
         resumeUrl(env.RESUME_HOST, "00000000-0000-4000-8000-000000000000"),
+        authed(),
       ),
       await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), {
         method: "POST",
       }),
+      await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY)),
     ];
 
-    expect(refusals.map((refusal) => refusal.status)).toEqual([404, 404, 404]);
+    expect(refusals.map((refusal) => refusal.status)).toEqual([
+      404, 404, 404, 401,
+    ]);
     expect(loggedKeySets(calls)).toEqual([
+      ALLOWLISTED_LOG_KEYS,
       ALLOWLISTED_LOG_KEYS,
       ALLOWLISTED_LOG_KEYS,
       ALLOWLISTED_LOG_KEYS,
@@ -2651,22 +2875,33 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
   });
 
   /**
-   * The audit must not smuggle the reader's identity into the request line,
-   * where the log allowlist would silently start carrying PII on every request
-   * the Worker serves - including the public ones.
+   * A leftover Access identity header on the request must not be copied into
+   * either log line. The Access model is superseded; echoing the header would
+   * put a staff member's address into the allowlisted request line on every
+   * request the Worker serves, including the public ones.
    */
-  it("keeps the Access identity out of the request log line", async () => {
+  it("never echoes a supplied Access identity into any log line", async () => {
     const calls = captureConsole();
 
-    await probeResume(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), {
-      headers: { [ACCESS_EMAIL_HEADER]: "staff.member@example.test" },
-    });
+    const download = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+      authed({
+        headers: { [ACCESS_EMAIL_HEADER]: "staff.member@example.test" },
+      }),
+    );
+
+    expect(download.status).toBe(200);
+    expect(loggedKeySets(calls)).toEqual([
+      AUDIT_LOG_KEYS,
+      ALLOWLISTED_LOG_KEYS,
+    ]);
 
     const requestLine = calls[1]!.args[0] as Record<string, unknown>;
-    expect(Object.keys(requestLine).sort()).toEqual(ALLOWLISTED_LOG_KEYS);
     expect(requestLine.path).toBe(`/resume/${STORED_RESUME_KEY}`);
     expect(requestLine.status).toBe(200);
-    expect(leakScanText(requestLine)).not.toContain("staff.member@example.test");
+    expect(
+      calls.map((call) => leakScanText(call.args[0])).join("\n"),
+    ).not.toContain("staff.member@example.test");
   });
 
   it("keeps /submit answering on a host that is not the resume host", async () => {
@@ -2683,6 +2918,486 @@ describe("GET /resume — route reachability (NOT authorization; Access is edge-
       resumeUrl: expect.stringMatching(
         /^https:\/\/resume-host\.test\/resume\/[0-9a-f-]{36}$/,
       ),
+    });
+  });
+});
+
+/**
+ * The challenge value a browser needs in order to show its native prompt.
+ * Written out whole: `realm` and `charset` are a published contract, and a
+ * member-by-member check would stay green if one of them vanished.
+ */
+const RESUME_CHALLENGE = 'Basic realm="AAG Resume Downloads", charset="UTF-8"';
+
+/** The complete, exclusive header set of a /resume auth challenge. */
+const RESUME_401_HEADERS = ["content-type", "www-authenticate"];
+
+describe("GET /resume — HTTP Basic Auth gate", () => {
+  beforeAll(async () => {
+    await seedResume(STORED_RESUME_KEY);
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  /**
+   * THE BINDING AUDIT.
+   *
+   * Every other test in this block leans on `RESUME_BASIC_HEADER`, a base64
+   * literal. That literal is only meaningful if the bindings still hold the
+   * values it encodes — and a fixture quietly supplying part of the value under
+   * test is exactly how the missing `/resume` segment survived two adversarial
+   * gates. So the bindings are pinned here as literals rather than trusted.
+   *
+   * Change `vitest.worker.config.ts` and this test goes red first, naming the
+   * problem, instead of every auth test going red for reasons nobody can read.
+   */
+  it("pins the test bindings this credential encodes", () => {
+    expect(env.RESUME_AUTH_USER).toBe("test-resume-user");
+    expect(env.RESUME_AUTH_PASSWORD).toBe("test-resume-password-7c1e5a");
+  });
+
+  /**
+   * THE PRESENCE OF A SUCCESS SIGNAL.
+   *
+   * Every finding in #2378 came from the same root cause: controls that assert
+   * the absence of a failure. "It did not 200" is satisfied by a Worker that is
+   * simply broken. This asserts the gate OPENS for the right credential and
+   * hands back the exact stored bytes, so the refusal tests below mean refusal
+   * rather than breakage.
+   */
+  it("streams the exact stored bytes when the configured credential is supplied", async () => {
+    const download = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+      authed(),
+    );
+
+    expect(download.status).toBe(200);
+    expect(download.bytes).toEqual([...STORED_RESUME_BYTES]);
+  });
+
+  /**
+   * FAIL CLOSED — THE SINGLE MOST IMPORTANT PROPERTY IN THIS FILE.
+   *
+   * Under Cloudflare Access, an unconfigured deploy meant a dead route, and a
+   * dead route was safe. Moving the gate into code INVERTS that: the Worker now
+   * decides for itself whether to serve, so an unset credential must mean
+   * "refuse everyone", never "let everyone through". Getting this backwards
+   * publishes every CV in the bucket to anyone who can guess a key.
+   *
+   * Both the omitted and the blank case are driven, separately and by name. They
+   * are different bugs: `undefined` comes from a secret that was never created,
+   * `""` from `wrangler secret put` accepting an empty value. An implementation
+   * that guards `undefined` with a plain falsy check catches both; one that
+   * guards with `!== undefined` catches only the first — and the blank case is
+   * the one that also matches an absent Authorization header, turning the gate
+   * into a welcome mat.
+   */
+  const UNCONFIGURED_CREDENTIALS: readonly (readonly [string, Partial<Env>])[] =
+    [
+      ["user omitted", { RESUME_AUTH_USER: undefined as unknown as string }],
+      [
+        "password omitted",
+        { RESUME_AUTH_PASSWORD: undefined as unknown as string },
+      ],
+      [
+        "both omitted",
+        {
+          RESUME_AUTH_USER: undefined as unknown as string,
+          RESUME_AUTH_PASSWORD: undefined as unknown as string,
+        },
+      ],
+      ["user blank", { RESUME_AUTH_USER: "" }],
+      ["password blank", { RESUME_AUTH_PASSWORD: "" }],
+      ["both blank", { RESUME_AUTH_USER: "", RESUME_AUTH_PASSWORD: "" }],
+      ["user whitespace-only", { RESUME_AUTH_USER: "   " }],
+      ["password whitespace-only", { RESUME_AUTH_PASSWORD: "\t \n" }],
+    ];
+
+  /**
+   * THE CREDENTIAL SHAPES AN UNCONFIGURED DEPLOY MUST REFUSE, and the reason
+   * there are three of them rather than one.
+   *
+   * An earlier version of this test drove only `authed()` — a VALID credential —
+   * against a blanked secret, and it passed the guard-removal sabotage. It
+   * passed for the wrong reason: `"test-resume-user" !== ""` is a mismatch, so
+   * the 401 came from the comparison, not from the guard the test claimed to be
+   * proving. Deleting the guard changed nothing it could see.
+   *
+   * The input that actually distinguishes them is an EMPTY credential, because
+   * an empty credential MATCHES a blank secret. `no credential` is what a
+   * stranger's browser sends on the first request, and `empty credential` is the
+   * one-line attack against it. Those two are the reason this array exists; the
+   * valid credential is kept only so the refusal is shown to be unconditional.
+   */
+  const REFUSED_SHAPES: readonly (readonly [string, RequestInit])[] = [
+    ["no credential", {}],
+    // base64 of ":" — an empty username and an empty password, the exact shape
+    // that matches an unset secret if the guard is missing.
+    ["empty credential", { headers: { Authorization: "Basic Og==" } }],
+    ["valid credential", authed()],
+  ];
+
+  for (const [label, override] of UNCONFIGURED_CREDENTIALS) {
+    it(`answers 401 and never touches R2 when the ${label}`, async () => {
+      const { bucket, reads } = recordingBucket();
+      const observed: { shape: string; status: number; challenge: string | null }[] =
+        [];
+
+      for (const [shape, init] of REFUSED_SHAPES) {
+        const ctx = createExecutionContext();
+        const response = await worker.fetch(
+          new Request(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), init),
+          { ...env, ...override, RESUMES: bucket },
+          ctx,
+        );
+        // Drained before any assertion: an ungated response here carries a live
+        // R2 stream, and leaving one open takes the whole file down.
+        const body = await response.text();
+        await waitOnExecutionContext(ctx);
+
+        expect(body).toBe('{"ok":false,"error":"UNAUTHORIZED"}');
+        observed.push({
+          shape,
+          status: response.status,
+          challenge: response.headers.get("WWW-Authenticate"),
+        });
+      }
+
+      expect(observed).toEqual(
+        REFUSED_SHAPES.map(([shape]) => ({
+          shape,
+          status: 401,
+          challenge: RESUME_CHALLENGE,
+        })),
+      );
+      expect(reads).toEqual([]);
+    });
+  }
+
+  /**
+   * The recorder above asserts an EMPTY list, which is worthless unless the
+   * recorder can produce a non-empty one. This drives a real, authenticated
+   * request through the same spy and pins the key it observed, so "no reads"
+   * above means "the Worker did not reach storage" rather than "the spy was
+   * never wired up".
+   */
+  it("records the key when an authenticated request does reach storage", async () => {
+    const { bucket, reads } = recordingBucket();
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY), authed()),
+      { ...env, RESUMES: bucket },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    // The stub answers null, so the object is absent and the route 404s — the
+    // point is only that the lookup HAPPENED.
+    expect(response.status).toBe(404);
+    expect(reads).toEqual([STORED_RESUME_KEY]);
+  });
+
+  /**
+   * The challenge has to be the real thing, or the browser shows no prompt and
+   * staff simply see a broken page. Header SET is exact so an accidental
+   * `Access-Control-Allow-Origin` on the one response an unauthenticated page
+   * can provoke turns this red.
+   */
+  it("challenges with a browser-usable Basic realm and nothing else", async () => {
+    const challenged = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+    );
+
+    expect(challenged.status).toBe(401);
+    expect(challenged.headerNames).toEqual(RESUME_401_HEADERS);
+    expect(challenged.header("WWW-Authenticate")).toBe(RESUME_CHALLENGE);
+  });
+
+  /**
+   * ONE REFUSAL, NOT FIVE.
+   *
+   * A response that differs between "wrong username" and "wrong password" hands
+   * an attacker a username oracle: they enumerate the user first, then the
+   * password, turning one search space into two much smaller ones. The same
+   * applies to distinguishing a malformed header from an absent one.
+   *
+   * So every rejected shape is compared byte-for-byte against the same
+   * baseline — status, complete header set, challenge value and body.
+   */
+  it("answers every rejected credential shape with a byte-identical refusal", async () => {
+    const shapes: readonly (readonly [string, RequestInit])[] = [
+      ["absent", {}],
+      ["empty Authorization", { headers: { Authorization: "" } }],
+      ["scheme only", { headers: { Authorization: "Basic" } }],
+      ["not base64", { headers: { Authorization: "Basic !!!not-base64!!!" } }],
+      [
+        "base64 without a colon",
+        { headers: { Authorization: "Basic dGVzdC1yZXN1bWUtdXNlcg==" } },
+      ],
+      ["bearer token", { headers: { Authorization: "Bearer some-token" } }],
+      [
+        "digest scheme",
+        { headers: { Authorization: 'Digest username="test-resume-user"' } },
+      ],
+      [
+        "wrong username",
+        { headers: { Authorization: RESUME_BASIC_WRONG_USER } },
+      ],
+      [
+        "wrong password",
+        { headers: { Authorization: RESUME_BASIC_WRONG_PASSWORD } },
+      ],
+      [
+        "correct password, empty username",
+        {
+          headers: {
+            Authorization: "Basic OnRlc3QtcmVzdW1lLXBhc3N3b3JkLTdjMWU1YQ==",
+          },
+        },
+      ],
+    ];
+
+    const observed: Record<string, unknown>[] = [];
+    for (const [label, init] of shapes) {
+      const probe = await probeResume(
+        resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+        init,
+      );
+      observed.push({
+        label,
+        status: probe.status,
+        headerNames: probe.headerNames,
+        challenge: probe.header("WWW-Authenticate"),
+        body: new TextDecoder().decode(new Uint8Array(probe.bytes)),
+      });
+    }
+
+    for (const entry of observed) {
+      expect({ ...entry, label: undefined }).toEqual({
+        label: undefined,
+        status: 401,
+        headerNames: RESUME_401_HEADERS,
+        challenge: RESUME_CHALLENGE,
+        body: '{"ok":false,"error":"UNAUTHORIZED"}',
+      });
+    }
+
+    // Proves the loop ran over every shape rather than zero of them.
+    expect(observed.map((entry) => entry.label)).toEqual(
+      shapes.map(([label]) => label),
+    );
+  });
+
+  /**
+   * CONSTANT-TIME COMPARISON, ASSERTED ON THE PRIMITIVE THAT PROVIDES IT.
+   *
+   * A timing measurement is far too noisy to assert on, and behaviourally `===`
+   * and a constant-time compare are indistinguishable from outside — which is
+   * precisely why swapping one for the other is the sabotage most likely to
+   * survive review. So this asserts on WHICH PRIMITIVE RAN.
+   *
+   * Two calls, not one, and that count is the real assertion. `userOk && passOk`
+   * short-circuits: a wrong username skips the password comparison entirely and
+   * the response comes back measurably sooner, which is the username oracle
+   * rebuilt out of control flow instead of string comparison. The credential
+   * used here has a WRONG USERNAME on purpose, so a short-circuiting
+   * implementation records one call and fails.
+   *
+   * The 32-byte assertion pins the other half: both operands are SHA-256
+   * digests, so the buffer lengths are fixed regardless of how long the supplied
+   * credential is. Feeding raw credentials to `timingSafeEqual` would leak
+   * length — and, since it throws on a length mismatch, would leak it as a
+   * thrown exception rather than a timing difference.
+   */
+  it("compares credentials with timingSafeEqual over fixed-width digests, without short-circuiting", async () => {
+    const timingSafeEqual = vi.spyOn(timingSafeSubtle, "timingSafeEqual");
+
+    const refused = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+      { headers: { Authorization: RESUME_BASIC_WRONG_USER } },
+    );
+
+    expect(refused.status).toBe(401);
+    expect(timingSafeEqual).toHaveBeenCalledTimes(2);
+    for (const [a, b] of timingSafeEqual.mock.calls) {
+      expect(a.byteLength).toBe(32);
+      expect(b.byteLength).toBe(32);
+    }
+  });
+
+  it("still runs both comparisons when no Authorization header was sent at all", async () => {
+    const timingSafeEqual = vi.spyOn(timingSafeSubtle, "timingSafeEqual");
+
+    const refused = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+    );
+
+    expect(refused.status).toBe(401);
+    expect(timingSafeEqual).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * An unauthenticated caller must not be able to tell a stored key from an
+   * unknown one. If a missing object 404'd before the gate ran, `/resume/<guess>`
+   * would become an existence oracle over a PII bucket.
+   */
+  it("gives an unauthenticated caller no way to tell a stored key from an unknown one", async () => {
+    const stored = await probeResume(
+      resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY),
+    );
+    const unknown = await probeResume(
+      resumeUrl(env.RESUME_HOST, "00000000-0000-4000-8000-000000000000"),
+    );
+
+    expect(stored.status).toBe(401);
+    expect({
+      status: unknown.status,
+      headerNames: unknown.headerNames,
+      bytes: unknown.bytes,
+    }).toEqual({
+      status: stored.status,
+      headerNames: stored.headerNames,
+      bytes: stored.bytes,
+    });
+  });
+
+  /**
+   * ORDER: HOST-LOCK FIRST, AUTH SECOND.
+   *
+   * The host lock decides whether this route exists on this hostname at all, so
+   * it has to answer before anything credential-shaped runs. Reversed, every
+   * hostname that reaches this Worker — `*.workers.dev`, preview URLs,
+   * `wrangler dev --remote`, the public submit host — would answer 401 and
+   * thereby ADVERTISE a credential-gated PII route to anyone who probed it,
+   * complete with a browser prompt to start guessing at.
+   *
+   * The observable contract is that a wrong host answers identically whether or
+   * not correct credentials were supplied: a wrong-host request must not reveal
+   * that the credentials would have been accepted.
+   */
+  it("answers a wrong host identically with and without valid credentials", async () => {
+    const withCredential = await probeResume(
+      resumeUrl("worker.test", STORED_RESUME_KEY),
+      authed(),
+    );
+    const withoutCredential = await probeResume(
+      resumeUrl("worker.test", STORED_RESUME_KEY),
+    );
+
+    expect(withCredential.status).toBe(404);
+    expect(withCredential.header("WWW-Authenticate")).toBeNull();
+    expect({
+      status: withoutCredential.status,
+      headerNames: withoutCredential.headerNames,
+      bytes: withoutCredential.bytes,
+    }).toEqual({
+      status: withCredential.status,
+      headerNames: withCredential.headerNames,
+      bytes: withCredential.bytes,
+    });
+  });
+
+  it("never challenges on a hostname the resume route is not served from", async () => {
+    for (const host of ["worker.test", "some-other-host.test"]) {
+      const probe = await probeResume(resumeUrl(host, STORED_RESUME_KEY));
+
+      expect(probe.status).toBe(404);
+      expect(probe.headerNames).toEqual(["content-type"]);
+    }
+  });
+});
+
+/**
+ * `/submit` IS PUBLIC AND MUST STAY PUBLIC.
+ *
+ * This is the same rule that has governed every slice of this change: a gate
+ * that reaches the public endpoint stops lead delivery, and it stops it
+ * SILENTLY — the candidate sees a failure, we see nothing, and the lead is gone.
+ * Basic Auth is the third mechanism in a row that could have leaked onto this
+ * route, so it gets an explicit test rather than an assumption.
+ */
+describe("POST /submit is never gated by the resume credential", () => {
+  it("completes a full submission with no Authorization header at all", async () => {
+    const captured = interceptZapier();
+
+    const response = await SELF.fetch(`${ORIGIN}/submit`, {
+      method: "POST",
+      body: resumeSubmission(),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      resumeUrl: expect.stringMatching(
+        /^https:\/\/resume-host\.test\/resume\/[0-9a-f-]{36}$/,
+      ),
+    });
+    // The forward is the half that actually delivers the lead, so a 200 alone
+    // is not the success signal — this is.
+    expect(JSON.parse(captured.body ?? "{}")).toMatchObject({
+      inquiryType: "Submit Resume",
+      // As submitted. The payload contract is frozen and does not normalise;
+      // only the erasure hash lower-cases and trims.
+      workEmail: "  Jane.Doe@Example.COM  ",
+    });
+  });
+
+  it("never emits WWW-Authenticate on any /submit response", async () => {
+    interceptZapier();
+
+    const responses = [
+      await SELF.fetch(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      // Unparseable body — the deploy probe's shape.
+      await SELF.fetch(`${ORIGIN}/submit`, { method: "POST" }),
+      await SELF.fetch(`${ORIGIN}/submit`, { method: "OPTIONS" }),
+    ];
+
+    for (const response of responses) {
+      expect(response.headers.get("WWW-Authenticate")).toBeNull();
+    }
+    expect(responses.map((response) => response.status)).toEqual([
+      200, 400, 204,
+    ]);
+  });
+
+  /**
+   * THE DEPLOY-ORDER FAILURE, MADE EXPLICIT.
+   *
+   * The resume credential is set out of band, in a separate step from the code
+   * deploy. Between those two moments the Worker runs with no resume secrets at
+   * all — and if that state stopped `/submit` from accepting submissions, the
+   * cutover window would silently eat every lead that arrived during it.
+   *
+   * `/resume` fails closed in this state (asserted above). `/submit` must not
+   * notice at all.
+   */
+  it("delivers a lead while the resume credential is completely unset", async () => {
+    const captured = interceptZapier();
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      {
+        ...env,
+        RESUME_AUTH_USER: undefined as unknown as string,
+        RESUME_AUTH_PASSWORD: undefined as unknown as string,
+      },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(response.headers.get("WWW-Authenticate")).toBeNull();
+    expect(JSON.parse(captured.body ?? "{}")).toMatchObject({
+      inquiryType: "Submit Resume",
     });
   });
 });

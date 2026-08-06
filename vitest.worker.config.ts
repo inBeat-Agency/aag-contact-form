@@ -54,6 +54,19 @@ export default defineWorkersConfig({
             // would have rejected. The path now comes from the Worker, and the
             // two bindings agree, so the emitted link can be fetched back.
             RESUME_URL_BASE: "https://resume-host.test",
+            // The /resume Basic Auth credential. SECRETS in production, fakes
+            // here, and the secret-hygiene test asserts neither ever reaches a
+            // log line — including via the base64 blob they are carried in.
+            //
+            // The suite does NOT build its Authorization header from these. It
+            // hand-writes the base64 literal and pins these two values in a
+            // separate assertion, so a binding edit turns the suite red instead
+            // of silently redefining what "a valid credential" means. That is
+            // the same class of defect as the /resume segment this file used to
+            // smuggle into RESUME_URL_BASE: a fixture supplying part of the
+            // value under test makes a wrong implementation look correct.
+            RESUME_AUTH_USER: "test-resume-user",
+            RESUME_AUTH_PASSWORD: "test-resume-password-7c1e5a",
             ZAPIER_HOOK_URL: "https://hooks.test/catch/1/abcdef",
             ZAPIER_SHARED_SECRET: "test-shared-secret-4f2a9c",
             ERASURE_SALT: "test-erasure-salt-91b7de",

@@ -80,21 +80,57 @@ ALLOWED_ORIGINS = "https://www.alphaapexgroup.com,https://alpha-apex-group.webfl
 # link for a lost lead.)
 RESUME_URL_BASE = ""
 
-# The ONE hostname `GET /resume/<key>` will answer on, and the same hostname the
-# Cloudflare Access application must be scoped to.
+# The ONE hostname `GET /resume/<key>` answers on.
 #
-# Access gates a hostname, not a Worker. Every other name that routes here - the
-# submit host, workers.dev, a preview URL - would otherwise serve candidate CVs
-# with no gate in front of them, because the Access app is on the other name and
-# never sees the request. The Worker compares this value and answers 404 to
-# everything else.
+# DEFENCE IN DEPTH, NOT THE PRIMARY CONTROL. Authorization is now HTTP Basic Auth
+# enforced inside the Worker (see RESUME_AUTH_* below); this lock exists so that
+# every OTHER name routing here - workers.dev, a preview URL, the public submit
+# host, `wrangler dev --remote` - behaves as though the route does not exist.
+#
+# The Worker checks this host BEFORE the credential, deliberately. Reversed,
+# every one of those hostnames would answer 401 and advertise a credential-gated
+# PII route to anyone probing, and the difference between 401 and 404 would tell
+# a caller on the wrong host whether their credentials would have been accepted.
 #
 # BLANK ON PURPOSE, and blank means "serve no resume anywhere". The zone is still
 # undecided (design open questions), and an unconfigured deploy that streams PII
 # from every hostname is far worse than one whose download route is simply dead.
-# Set it at deploy time, in the same step that creates the Access app (W3).
+# Set it at deploy time, together with the two secrets below.
 RESUME_HOST = ""
 
-# ZAPIER_HOOK_URL, ZAPIER_SHARED_SECRET and ERASURE_SALT are Worker SECRETS.
-# They are intentionally absent from this file. Tests inject fakes through
-# vitest.worker.config.ts.
+# ---------------------------------------------------------------------------
+# WORKER SECRETS - set with `wrangler secret put`, NEVER as vars, NEVER here.
+#
+#   ZAPIER_HOOK_URL         forward destination
+#   ZAPIER_SHARED_SECRET    header the Zap filters on
+#   ERASURE_SALT            HMAC key for the candidate erasure index
+#   RESUME_AUTH_USER        HTTP Basic username for GET /resume/<key>
+#   RESUME_AUTH_PASSWORD    HTTP Basic password for GET /resume/<key>
+#
+# They are intentionally absent from this file - a var is readable from the
+# dashboard and is committed here in plaintext, and RESUME_AUTH_* authorises
+# reads of candidate PII. Tests inject fakes through vitest.worker.config.ts.
+#
+# THE /resume FAIL-CLOSED CONTRACT. Read this before deploying.
+#
+# If RESUME_AUTH_USER or RESUME_AUTH_PASSWORD is missing, blank, or
+# whitespace-only, `GET /resume/<key>` answers 401 for EVERY request and never
+# reads the bucket. It does not fall back to "no auth required", it does not
+# compare against an empty string, and there is no default in source.
+#
+# This is the OPPOSITE of the direction that used to be safe here. Under
+# Cloudflare Access an unconfigured deploy meant a dead route, because the gate
+# lived at the edge. The gate now lives in the Worker, so an unconfigured deploy
+# that "allowed by default" would publish every stored CV to anyone who can
+# guess a key. Blank must mean refuse.
+#
+# The credential is SHARED, so it buys no per-person attribution: the audit line
+# records that a download was authenticated, not who authenticated it. Revoking
+# one reader means rotating for everyone. That is an accepted cost of shipping
+# without Zero Trust, not an oversight.
+#
+# `POST /submit` is PUBLIC and is never affected by any of this. The resume
+# credential is not in the mandatory-binding check that guards /submit, on
+# purpose: the secrets are set out of band, and a submit endpoint that refused
+# leads while /resume was being configured would silently lose every lead
+# arriving in that window.

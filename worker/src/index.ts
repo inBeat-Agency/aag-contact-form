@@ -1,17 +1,26 @@
 /**
  * Cloudflare Worker for the AAG contact form.
  *
- * `POST /submit` is PUBLIC by design and must never be covered by a Cloudflare
- * Access application — gating it means 100% lead loss. `GET /resume/<key>` will
- * be added in a later slice and is gated at the hostname edge, not in code.
+ * `POST /submit` is PUBLIC by design and must never require credentials —
+ * gating it means 100% lead loss, silently. `GET /resume/<key>` is gated by HTTP
+ * Basic Auth enforced IN THIS FILE (see {@link authorizeResume}), behind a
+ * hostname lock that runs first.
  *
- * Two rules run through every response in this file:
+ * The gate used to be Cloudflare Access at the edge. Zero Trust is not enabled
+ * on this account, so authorization moved into code — which INVERTS the safe
+ * default: an unconfigured deploy used to mean a dead route, and must now mean a
+ * refusing one. Read the fail-closed paragraph in {@link authorizeResume} before
+ * changing anything on that path.
+ *
+ * Three rules run through every response in this file:
  *
  *   1. Error bodies come EXCLUSIVELY from {@link ErrorCode}. A caught error is
  *      never wrapped, stringified or echoed back to the client.
  *   2. CORS headers are emitted on `/submit` only. `/resume` streams candidate
- *      CVs on the origin whose session is the staff Access identity; making that
- *      cross-origin readable would be a PII leak.
+ *      CVs, and making those cross-origin readable would be a PII leak.
+ *   3. Nothing logs the `Authorization` header or either resume credential. It
+ *      now travels inbound on every gated request, so a single "log the request
+ *      for debugging" line is a credential leak.
  */
 
 import { toZapierPayload, type ZapierPayload } from "./payload";
@@ -37,6 +46,15 @@ export interface Env {
   ALLOWED_ORIGINS: string;
   RESUME_HOST: string;
   RESUME_URL_BASE: string;
+  /**
+   * Shared HTTP Basic credential for `GET /resume/<key>`. WORKER SECRETS, never
+   * vars: they authorise reads of candidate PII.
+   *
+   * Both are REQUIRED for the route to serve anything. See
+   * {@link authorizeResume} for why an unset one refuses instead of allowing.
+   */
+  RESUME_AUTH_USER: string;
+  RESUME_AUTH_PASSWORD: string;
   ZAPIER_HOOK_URL: string;
   ZAPIER_SHARED_SECRET: string;
   ERASURE_SALT: string;
@@ -53,6 +71,7 @@ export type ErrorCode =
   | "UNSUPPORTED_FILE_TYPE"
   | "STORAGE_FAILED"
   | "FORWARD_FAILED"
+  | "UNAUTHORIZED"
   | "NOT_FOUND";
 
 const ERROR_STATUS: Record<ErrorCode, number> = {
@@ -61,6 +80,7 @@ const ERROR_STATUS: Record<ErrorCode, number> = {
   UNSUPPORTED_FILE_TYPE: 415,
   STORAGE_FAILED: 502,
   FORWARD_FAILED: 502,
+  UNAUTHORIZED: 401,
   NOT_FOUND: 404,
 };
 
@@ -577,17 +597,16 @@ async function handleSubmit(request: Request, env: Env): Promise<Routed> {
 }
 
 /**
- * Is this request arriving on the one hostname the Access application covers?
+ * Is this request arriving on the one hostname `/resume` is served from?
  *
- * THIS COMPARISON IS THE ONLY THING STANDING BETWEEN A STRANGER AND A CANDIDATE'S
- * CV, and it is worth being explicit about why.
+ * DEFENCE IN DEPTH, NO LONGER THE PRIMARY CONTROL. The credential check in
+ * {@link authorizeResume} is what actually stands between a stranger and a
+ * candidate's CV; this narrows the surface that check has to defend.
  *
- * Authorization deliberately lives at the edge, not in this file: Cloudflare
- * Access challenges the request before the isolate ever runs. But Access is bound
- * to ONE hostname, while every other name that routes to this Worker - the submit
+ * It still earns its place. Every name that routes to this Worker - the submit
  * host, `*.workers.dev`, a preview URL, `wrangler dev --remote` - reaches the
- * same code with no gate in front of it. Without this check,
- * `<submit-host>/resume/<key>` streams PII to anyone who asks.
+ * same code, and this is what makes all of them behave as though the route does
+ * not exist rather than advertising a credential-gated PII endpoint on each one.
  *
  * An unset or blank binding matches NOTHING. An unconfigured deploy serving CVs
  * from every hostname is the failure mode; answering 404 everywhere is merely a
@@ -600,6 +619,179 @@ function isResumeHost(env: Env, url: URL): boolean {
   const configured = (env.RESUME_HOST ?? "").trim().toLowerCase();
   if (configured === "") return false;
   return url.hostname.toLowerCase() === configured;
+}
+
+/**
+ * The challenge that makes a browser show its native credential prompt.
+ *
+ * `charset="UTF-8"` is not decoration: without it a browser may encode a
+ * non-ASCII credential as latin1, and the comparison below decodes UTF-8. The
+ * realm is a fixed, meaningless-to-an-attacker label — it is echoed to anyone
+ * who asks, so it must never name a host, an account or an environment.
+ */
+const RESUME_CHALLENGE_HEADERS: Record<string, string> = {
+  "WWW-Authenticate": 'Basic realm="AAG Resume Downloads", charset="UTF-8"',
+};
+
+/**
+ * Proof that Basic Auth succeeded, and the ONLY way into the download handler.
+ *
+ * This type exists to make an unauthenticated 200 impossible to write rather
+ * than merely unlikely: {@link handleResumeDownload} demands one, and the single
+ * expression in this file that produces one sits behind the comparison in
+ * {@link authorizeResume}. Deleting the auth call does not produce an insecure
+ * Worker, it produces one that does not compile.
+ *
+ * It also carries the value the audit line records, so "this download was
+ * authenticated" is read off the proof itself instead of being a label the
+ * logger chooses independently and could drift from.
+ */
+type ResumeAuthGrant = { readonly method: "basic" };
+
+const RESUME_AUTH_GRANT: ResumeAuthGrant = { method: "basic" };
+
+/** A supplied Basic credential, or empty strings when there was nothing usable. */
+type BasicCredential = { user: string; password: string };
+
+const NO_CREDENTIAL: BasicCredential = { user: "", password: "" };
+
+/**
+ * Pull the username and password out of an `Authorization` header.
+ *
+ * EVERY UNUSABLE SHAPE COLLAPSES TO THE SAME EMPTY CREDENTIAL — absent header,
+ * empty value, a non-Basic scheme, invalid base64, a payload with no colon. They
+ * are not distinguished because distinguishing them is a disclosure: an attacker
+ * who can tell "malformed" from "wrong password" learns which half of their
+ * guess was already right, and one search space becomes two smaller ones.
+ *
+ * The decode is base64 -> BYTES -> UTF-8, not `atob` alone. `atob` yields one
+ * char per byte, so a credential containing any non-ASCII character would be
+ * compared as mojibake and could never match the configured secret - a bug that
+ * only appears for the users least able to diagnose it.
+ *
+ * The split is on the FIRST colon only: RFC 7617 forbids a colon in the
+ * username and explicitly permits one in the password.
+ */
+function parseBasicCredential(header: string | null): BasicCredential {
+  if (header === null) return NO_CREDENTIAL;
+
+  const separatorIndex = header.indexOf(" ");
+  if (separatorIndex === -1) return NO_CREDENTIAL;
+
+  const scheme = header.slice(0, separatorIndex);
+  if (scheme.toLowerCase() !== "basic") return NO_CREDENTIAL;
+
+  const encoded = header.slice(separatorIndex + 1).trim();
+  if (encoded === "") return NO_CREDENTIAL;
+
+  let decoded: string;
+  try {
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    decoded = new TextDecoder("utf-8").decode(bytes);
+  } catch {
+    return NO_CREDENTIAL;
+  }
+
+  const colon = decoded.indexOf(":");
+  if (colon === -1) return NO_CREDENTIAL;
+
+  return {
+    user: decoded.slice(0, colon),
+    password: decoded.slice(colon + 1),
+  };
+}
+
+/**
+ * `timingSafeEqual` is a Cloudflare runtime extension to WebCrypto.
+ *
+ * This project's `tsconfig.worker.json` loads BOTH the DOM lib (for FormData and
+ * File) and the Workers types, and for the global `crypto` the DOM declaration
+ * wins - so the method exists at runtime but not in the type. It is narrowed
+ * here, in one named place with a reason attached, rather than smeared across
+ * the call site as `any`: `any` would also silently swallow a future signature
+ * change on the one comparison guarding candidate PII.
+ *
+ * The cast preserves object identity, so this is the same object as
+ * `crypto.subtle` and a test spy on it is observed here.
+ */
+type TimingSafeSubtleCrypto = {
+  timingSafeEqual(a: ArrayBuffer, b: ArrayBuffer): boolean;
+};
+
+const timingSafeSubtle = crypto.subtle as unknown as TimingSafeSubtleCrypto;
+
+/**
+ * Compare two secrets without leaking their contents through timing.
+ *
+ * BOTH SIDES ARE HASHED FIRST, and that is the load-bearing detail rather than
+ * belt-and-braces. `crypto.subtle.timingSafeEqual` THROWS when its operands have
+ * different lengths, so feeding it raw credentials would turn every length
+ * mismatch into a thrown exception - a far louder side channel than the timing
+ * difference it was reached for. SHA-256 makes both operands exactly 32 bytes
+ * whatever went in, so length stops being observable at all and the comparison
+ * cost stops depending on the input.
+ *
+ * A plain `===` leaks both: it returns immediately on a length mismatch, and
+ * bails at the first differing byte, so an attacker can recover a secret one
+ * character at a time by measuring.
+ */
+async function constantTimeEquals(
+  supplied: string,
+  expected: string,
+): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const [suppliedDigest, expectedDigest] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(supplied)),
+    crypto.subtle.digest("SHA-256", encoder.encode(expected)),
+  ]);
+  return timingSafeSubtle.timingSafeEqual(suppliedDigest, expectedDigest);
+}
+
+/**
+ * Authorise a resume download, or refuse.
+ *
+ * FAIL CLOSED. THIS IS THE MOST IMPORTANT PARAGRAPH IN THE FILE.
+ *
+ * Under Cloudflare Access the gate lived at the edge, so an unconfigured deploy
+ * meant a dead route - `RESUME_HOST` blank, 404 everywhere - and a dead route is
+ * safe. Moving the gate into code INVERTS the safe default: this function now
+ * decides for itself whether to serve, so a missing credential must mean "refuse
+ * everyone" and never "compare against nothing and let it pass". An unset Worker
+ * secret arrives as `undefined`, and a blank one is what `wrangler secret put`
+ * stores for an empty value; both are unconfigured, and a blank expectation
+ * would MATCH the empty credential an absent `Authorization` header produces.
+ * That single mistake would publish every CV in the bucket.
+ *
+ * The check is on the trimmed value but the comparison uses the raw one: a
+ * whitespace-only secret is a provisioning accident, while a real secret is
+ * matched byte for byte exactly as it was configured.
+ *
+ * The two comparisons are combined with a BITWISE `&`, deliberately, and a
+ * `&&` here would be a bug. `&&` short-circuits, so a wrong username would skip
+ * the password comparison entirely and answer measurably sooner - rebuilding
+ * the username oracle out of control flow after the string comparison was
+ * hardened against exactly that. Both comparisons always run, for every request,
+ * including one that carried no credential at all.
+ */
+async function authorizeResume(
+  request: Request,
+  env: Env,
+): Promise<ResumeAuthGrant | null> {
+  const expectedUser = String(env.RESUME_AUTH_USER ?? "");
+  const expectedPassword = String(env.RESUME_AUTH_PASSWORD ?? "");
+  if (expectedUser.trim() === "" || expectedPassword.trim() === "") return null;
+
+  const supplied = parseBasicCredential(request.headers.get("Authorization"));
+
+  const [userMatches, passwordMatches] = await Promise.all([
+    constantTimeEquals(supplied.user, expectedUser),
+    constantTimeEquals(supplied.password, expectedPassword),
+  ]);
+
+  return (Number(userMatches) & Number(passwordMatches)) === 1
+    ? RESUME_AUTH_GRANT
+    : null;
 }
 
 /** Used when the stored name is absent or sanitises away to nothing. */
@@ -627,19 +819,20 @@ function sanitizeFileName(name: string): string {
 /**
  * Response headers for a resume download (D-L).
  *
- * A CV is an attacker-supplied binary served on the SAME ORIGIN whose session is
- * the Access identity. If the browser renders it inline, a malicious PDF runs in
- * the one origin whose cookies unlock every other candidate's file. So it is
- * never a page: `attachment` forces a download, `nosniff` stops the browser
- * second-guessing the stored type back into something renderable, and the CSP
- * sandbox leaves anything that does execute with no origin and no privileges.
- * `no-referrer` keeps the key out of outbound headers and `no-store` keeps the
- * bytes off shared disks.
+ * A CV is an attacker-supplied binary served on the SAME ORIGIN a staff member
+ * has just authenticated to. If the browser renders it inline, a malicious PDF
+ * runs in the one origin whose cached credential unlocks every other candidate's
+ * file. So it is never a page: `attachment` forces a download, `nosniff` stops
+ * the browser second-guessing the stored type back into something renderable,
+ * and the CSP sandbox leaves anything that does execute with no origin and no
+ * privileges. `no-referrer` keeps the key out of outbound headers and `no-store`
+ * keeps the bytes off shared disks.
  *
  * THERE IS DELIBERATELY NO `Access-Control-Allow-Origin` HERE, AT ANY STATUS
  * (W6). CORS belongs to `/submit` alone. Adding it would let any page in a
- * staff member's browser read a candidate's CV using that staff member's own
- * Access session.
+ * staff member's browser read a candidate's CV — and browsers replay a cached
+ * Basic credential on same-origin requests automatically, so the CV would come
+ * back without the attacker ever seeing the credential itself.
  */
 function resumeDownloadHeaders(
   contentType: string,
@@ -656,53 +849,49 @@ function resumeDownloadHeaders(
 }
 
 /**
- * Header Cloudflare Access adds once it has authenticated the reader.
+ * The record that a stored CV was read.
  *
- * Read as a SINGLE VALUE, never as a collection. Logging the whole header set
- * would put the Access session cookie into the log line.
+ * IT NO LONGER NAMES A PERSON, AND THAT IS A DELIBERATE, ACCEPTED LOSS.
+ *
+ * Cloudflare Access authenticated an individual and passed their address in a
+ * header, so this line used to pair a key with a reader. A shared Basic
+ * credential authenticates no one in particular: every member of staff presents
+ * the same secret, so any identity written here would be an invention. The
+ * honest record is that the read happened and that it was authenticated.
+ *
+ * The `auth` value comes off the {@link ResumeAuthGrant} rather than being a
+ * literal chosen here, so it cannot claim an authentication that did not occur -
+ * there is no way to reach this function without one.
+ *
+ * The candidate is still not named. They are already identified by the key, and
+ * copying their address in would spread the PII this route exists to protect.
  */
-const ACCESS_IDENTITY_HEADER = "Cf-Access-Authenticated-User-Email";
-
-/** Deliberately loud: on a gated hostname, an unattributable read is an alarm. */
-const NO_ACCESS_IDENTITY = "<no-access-identity>";
-
-/**
- * The only record of who read which CV.
- *
- * Access authenticates the reader at the edge and then forgets, so without this
- * line PII access on this route is unattributable after the fact - there is no
- * other place the pairing exists.
- *
- * Two keys, on purpose. The candidate is already identified by the key; copying
- * their address in as well would spread the PII this route exists to protect.
- * A missing identity is recorded rather than skipped: on a hostname that is
- * supposed to be gated, its absence means the request reached this Worker
- * WITHOUT passing Access, and that is exactly the event worth finding later.
- */
-function auditResumeDownload(request: Request, key: string): void {
-  console.log({
-    key,
-    email: request.headers.get(ACCESS_IDENTITY_HEADER) ?? NO_ACCESS_IDENTITY,
-  });
+function auditResumeDownload(key: string, grant: ResumeAuthGrant): void {
+  console.log({ key, auth: grant.method });
 }
 
 /**
- * Stream a stored resume to an already-authenticated staff member.
+ * Stream a stored resume to an authenticated staff member.
+ *
+ * THE GRANT PARAMETER IS THE POINT. It is unused as data beyond the audit line,
+ * and it is required anyway: it makes "serve a CV without checking credentials"
+ * a compile error rather than a code review someone has to catch. See
+ * {@link ResumeAuthGrant}.
  *
  * The 404 for a missing object is the SAME fixed 404 a wrong host gets, and that
  * is intentional: the response must not tell a caller whether a key exists.
  */
 async function handleResumeDownload(
-  request: Request,
   key: string,
   env: Env,
+  grant: ResumeAuthGrant,
 ): Promise<Routed> {
   const object = await env.RESUMES.get(key);
   if (object === null) return fail("NOT_FOUND");
 
   // Written at the moment the object is read, not assembled at the end, so a
   // later failure cannot drop the record of a read that already happened.
-  auditResumeDownload(request, key);
+  auditResumeDownload(key, grant);
 
   return {
     response: new Response(object.body, {
@@ -749,8 +938,31 @@ async function route(
     url.pathname.startsWith(RESUME_PATH_PREFIX) &&
     isResumeHost(env, url)
   ) {
+    /**
+     * ORDER: HOST LOCK FIRST, CREDENTIAL SECOND. This is a security decision,
+     * not a style one.
+     *
+     * The host lock answers a routing question - does this route exist on the
+     * hostname this request arrived on? - and every other name that reaches this
+     * Worker (`*.workers.dev`, preview URLs, `wrangler dev --remote`, the public
+     * submit host) must answer as though it does not.
+     *
+     * Reversed, all of those names would answer 401 and thereby ADVERTISE a
+     * credential-gated route over candidate PII, complete with a browser prompt
+     * to start guessing at. A wrong-host request would also reveal, by the
+     * difference between 401 and 404, whether the credentials it carried WOULD
+     * have been accepted. In this order a wrong host is byte-identical whether
+     * the request was authenticated or not, and reveals nothing either way.
+     *
+     * Within the correct host the credential is checked BEFORE the R2 lookup, so
+     * an unauthenticated caller cannot use the difference between "found" and
+     * "not found" to probe which keys exist.
+     */
+    const grant = await authorizeResume(request, env);
+    if (grant === null) return fail("UNAUTHORIZED", RESUME_CHALLENGE_HEADERS);
+
     const key = url.pathname.slice(RESUME_PATH_PREFIX.length);
-    if (key !== "") return handleResumeDownload(request, key, env);
+    if (key !== "") return handleResumeDownload(key, env, grant);
   }
 
   return fail("NOT_FOUND");
