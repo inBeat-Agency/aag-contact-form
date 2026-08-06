@@ -1,0 +1,192 @@
+# Cloudflare Worker config for the contact-form submit/resume endpoints.
+#
+# This is a SECOND, separate config. The repo root `wrangler.toml` configures the
+# existing Cloudflare Pages project and must not be merged with this one.
+#
+# `workers_dev = true` and NO `routes`/`route` block: the custom hostname has not
+# been decided yet (design D6, open question). Hostnames are configuration, never
+# source literals — the resume URL is built from the RESUME_URL_BASE var below,
+# so repointing a domain is a config edit and not a code change.
+
+name = "aag-contact-form-worker"
+main = "src/index.ts"
+
+# Pinned ON PURPOSE. This Cloudflare account is shared across several client
+# projects, and the deploying identity can see more than one account. Without
+# this line `wrangler deploy` either fails asking which account to use, or -
+# worse - silently follows a CLOUDFLARE_ACCOUNT_ID environment variable and
+# deploys someone else's project into the wrong place. Ambiguity here is not
+# worth the convenience of omitting it.
+account_id = "0562da4b8c54413c6043de4508c0ba64"
+
+# Must not exceed the date the INSTALLED workerd supports, or every test in the
+# worker suite silently runs against different runtime semantics than a deploy
+# would get - miniflare falls back with a warning nobody reads and CI calls it
+# green. `worker/wrangler.config.test.ts` asserts the relationship, and
+# `scripts/test-worker.mjs` fails the run if the fallback ever happens anyway.
+#
+# To move this forward, upgrade `@cloudflare/vitest-pool-workers` (and with it
+# workerd) FIRST, then raise this date to match. Note the pool-workers pin in
+# `vitest.worker.config.ts`: 0.13.0+ requires vitest 4.
+compatibility_date = "2026-03-10"
+
+workers_dev = true
+
+# Private bucket. Public access (the r2.dev URL and any connected custom domain)
+# is a dashboard toggle that is invisible to this file and is asserted separately
+# by the S3 preflight script.
+[[r2_buckets]]
+binding = "RESUMES"
+bucket_name = "aag-resumes"
+
+# ---------------------------------------------------------------------------
+# RATE LIMITING - Cloudflare's NATIVE binding, one budget per public route.
+#
+# WHY THE BINDING AND NOT A WAF RULE. A WAF rate limiting rule is configured per
+# ZONE, and this Worker is served from workers.dev because the custom domain is
+# still an open question (design D6). We control no zone, so that route is not
+# available. This binding needs no zone, no KV and no Durable Object, it works on
+# workers.dev today, and it keeps working unchanged after the domain migration.
+#
+# READ THIS BEFORE TRUSTING THESE NUMBERS - THE LIMIT IS PER CLOUDFLARE LOCATION,
+# NOT GLOBAL. Cloudflare counts these at the colo that served the request. A
+# client whose traffic lands in one colo sees the limit below; an attacker spread
+# across N colos gets N times the ceiling, and Cloudflare runs hundreds of them.
+#
+# So this mitigates CASUAL abuse - one script on one machine, a stranger with
+# curl, an accidental retry loop in someone's integration - and it does NOT stop
+# a serious distributed attack. Nothing downstream should assume otherwise. If
+# that threat ever becomes real the answer is a zone plus a WAF rule, not a
+# smaller number here.
+#
+# `period` accepts ONLY 10 or 60. Any other value is rejected at deploy time.
+#
+# The two namespace_id values MUST DIFFER. They are what separates the budgets:
+# sharing one would let a burst of form spam lock staff out of every CV they need
+# to read that morning - one endpoint's abuse taking down an unrelated one.
+#
+# `worker/wrangler.config.test.ts` pins every number and id below as hand-typed
+# literals, and asserts them against the constants in `worker/src/rate-limit.ts`
+# where the reasoning lives. Edit one side without the other and the suite goes
+# red naming the drift, which is the only reason the comments in that file can be
+# trusted to describe the limits this Worker actually has.
+
+# POST /submit - 20 per 60s per client.
+#
+# DELIBERATELY GENEROUS. A corporate NAT puts a whole office behind ONE address,
+# so several recruiters at one client company share this budget. A limit tuned to
+# a single human refuses real candidates, and a refused candidate is a lead lost
+# SILENTLY - they see an error, give up, and nothing records that they existed.
+# That is the failure this entire Worker was built to eliminate, so the number
+# sits far above plausible human traffic and still far below what a script does.
+[[ratelimits]]
+name = "SUBMIT_LIMITER"
+namespace_id = "1001"
+simple = { limit = 20, period = 60 }
+
+# GET /resume/<key> - 60 per 60s per client.
+#
+# Larger because this route is BROWSED, not submitted: a staff member working
+# through a morning's applications legitimately opens many CVs in a few minutes,
+# all from the same office address. It exists to cap credential guessing and key
+# enumeration, both of which need far more than 60 attempts to be worth anything.
+[[ratelimits]]
+name = "RESUME_LIMITER"
+namespace_id = "1002"
+simple = { limit = 60, period = 60 }
+
+[vars]
+# Comma-separated ALLOWLIST of origins allowed to read a /submit response. The
+# Worker echoes back the caller's OWN origin when it appears here, and emits no
+# Access-Control-Allow-Origin at all when it does not - never `*`, which cannot
+# be used with credentials and would hand the response to any site, and never a
+# fixed value, which silently breaks every other legitimate origin.
+#
+# BOTH ENTRIES ARE REQUIRED DURING THE MIGRATION WINDOW. alphaapexgroup.com still
+# serves Squarespace, so the widget is mounted on the Webflow staging origin AND
+# on production as the cutover proceeds. A list that holds only one of them is
+# not a smaller risk, it is a guaranteed outage on the day the other goes live:
+# multipart is CORS-safelisted, so NO preflight fires, and a non-matching origin
+# still gets its lead delivered and its CV stored while the response is withheld
+# from the page. The candidate sees an error and submits again - duplicate leads
+# plus a false failure report, which is worse than a clean refusal.
+#
+# Order does not matter and whitespace is tolerated; empty entries are ignored.
+# `worker/wrangler.config.test.ts` asserts this line still names exactly these
+# two origins, because the runtime suite reads its own test binding and cannot.
+ALLOWED_ORIGINS = "https://www.alphaapexgroup.com,https://alpha-apex-group.webflow.io"
+
+# Base for the resume URL handed to Zapier. Set at deploy time to the resume
+# hostname. There is deliberately no source-level fallback: if this is missing
+# the Worker fails the request loudly instead of forwarding a lead whose CV link
+# points nowhere.
+#
+# ORIGIN ONLY - scheme and host, e.g. "https://resumes.example.com". Do NOT
+# append "/resume": the Worker owns that segment and reads it from the same
+# constant its router matches on. A base carrying its own path is REJECTED, and
+# it is rejected because the alternative already cost us: the segment lived in
+# configuration on the test deploy and in code on the real one, so each side
+# assumed the other supplied it and every live lead shipped a link to a 404.
+#
+# It must also name the SAME host as RESUME_HOST below. Those two bindings
+# describe one fact, so they can contradict each other; when they do, the link
+# is dead on arrival and nothing in the response says so. A mismatch is refused
+# rather than forwarded. (A blank RESUME_HOST is exempt - that is an
+# unconfigured deploy, not a contradiction, and failing there would trade a dead
+# link for a lost lead.)
+RESUME_URL_BASE = ""
+
+# The ONE hostname `GET /resume/<key>` answers on.
+#
+# DEFENCE IN DEPTH, NOT THE PRIMARY CONTROL. Authorization is now HTTP Basic Auth
+# enforced inside the Worker (see RESUME_AUTH_* below); this lock exists so that
+# every OTHER name routing here - workers.dev, a preview URL, the public submit
+# host, `wrangler dev --remote` - behaves as though the route does not exist.
+#
+# The Worker checks this host BEFORE the credential, deliberately. Reversed,
+# every one of those hostnames would answer 401 and advertise a credential-gated
+# PII route to anyone probing, and the difference between 401 and 404 would tell
+# a caller on the wrong host whether their credentials would have been accepted.
+#
+# BLANK ON PURPOSE, and blank means "serve no resume anywhere". The zone is still
+# undecided (design open questions), and an unconfigured deploy that streams PII
+# from every hostname is far worse than one whose download route is simply dead.
+# Set it at deploy time, together with the two secrets below.
+RESUME_HOST = ""
+
+# ---------------------------------------------------------------------------
+# WORKER SECRETS - set with `wrangler secret put`, NEVER as vars, NEVER here.
+#
+#   ZAPIER_HOOK_URL         forward destination
+#   ZAPIER_SHARED_SECRET    header the Zap filters on
+#   ERASURE_SALT            HMAC key for the candidate erasure index
+#   RESUME_AUTH_USER        HTTP Basic username for GET /resume/<key>
+#   RESUME_AUTH_PASSWORD    HTTP Basic password for GET /resume/<key>
+#
+# They are intentionally absent from this file - a var is readable from the
+# dashboard and is committed here in plaintext, and RESUME_AUTH_* authorises
+# reads of candidate PII. Tests inject fakes through vitest.worker.config.ts.
+#
+# THE /resume FAIL-CLOSED CONTRACT. Read this before deploying.
+#
+# If RESUME_AUTH_USER or RESUME_AUTH_PASSWORD is missing, blank, or
+# whitespace-only, `GET /resume/<key>` answers 401 for EVERY request and never
+# reads the bucket. It does not fall back to "no auth required", it does not
+# compare against an empty string, and there is no default in source.
+#
+# This is the OPPOSITE of the direction that used to be safe here. Under
+# Cloudflare Access an unconfigured deploy meant a dead route, because the gate
+# lived at the edge. The gate now lives in the Worker, so an unconfigured deploy
+# that "allowed by default" would publish every stored CV to anyone who can
+# guess a key. Blank must mean refuse.
+#
+# The credential is SHARED, so it buys no per-person attribution: the audit line
+# records that a download was authenticated, not who authenticated it. Revoking
+# one reader means rotating for everyone. That is an accepted cost of shipping
+# without Zero Trust, not an oversight.
+#
+# `POST /submit` is PUBLIC and is never affected by any of this. The resume
+# credential is not in the mandatory-binding check that guards /submit, on
+# purpose: the secrets are set out of band, and a submit endpoint that refused
+# leads while /resume was being configured would silently lose every lead
+# arriving in that window.

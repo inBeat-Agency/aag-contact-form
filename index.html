@@ -76,11 +76,8 @@
         const url = typeof input === "string" ? input : input.url;
         if (url && url.includes("/__mock__/contact")) {
           const body = init && init.body;
-          // The widget posts URLSearchParams to Zapier today and multipart once
-          // the Worker lands; log either rather than silently showing nothing.
-          if (body instanceof URLSearchParams || body instanceof FormData) {
+          if (body instanceof FormData) {
             console.log("[mock] received submission:");
-            console.log(`  (body type: ${body.constructor.name})`);
             for (const [key, value] of body.entries()) {
               console.log(`  ${key} =`, value);
             }

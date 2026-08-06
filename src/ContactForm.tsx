@@ -93,11 +93,11 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
 
   async function onSubmit(values: ContactFormFields) {
     setStatus("submitting");
-    const outcome = await submitContactForm(
+    const result = await submitContactForm(
       endpoint,
       buildFormData(values, source),
     );
-    setStatus(outcome);
+    setStatus(result.outcome);
   }
 
   function handleFormSubmit(event: FormEvent<HTMLFormElement>) {

@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+import {
+  hasAllowedResumeExtension,
+  isAllowedResumeMimeType,
+  MAX_FILE_NAME_BYTES,
+  MAX_RESUME_BYTES,
+  MAX_TEXT_FIELD_CHARS,
+  utf8ByteLength,
+} from "../worker/src/limits";
+
 /**
  * Single source of truth for the AAG Contact Us widget data contract.
  *
@@ -13,14 +22,14 @@ import { z } from "zod";
 // Option constants (kept exported so the UI renders from the same source).
 // ---------------------------------------------------------------------------
 
-export const INQUIRY_TYPES = [
-  "Recruitment / Hiring",
-  "Consulting",
-  "General Question",
-  "Submit Resume",
-] as const;
+/**
+ * RE-EXPORT, not a definition. The list lives in `worker/src/limits.ts` next to
+ * the per-type field requirements the Worker enforces, so the form cannot offer
+ * a category the server does not recognise.
+ */
+export { INQUIRY_TYPES, type InquiryType } from "../worker/src/limits";
 
-export type InquiryType = (typeof INQUIRY_TYPES)[number];
+import type { InquiryType } from "../worker/src/limits";
 
 export const COMPANY_SIZES = ["1-50", "51-200", "201-1,000", "1,000+"] as const;
 
@@ -34,37 +43,57 @@ export const BUDGETS = [
 
 export const TIMELINES = ["ASAP", "1-3 months", "1-6 months", "6+ months"] as const;
 
-// File constraints for the Submit Resume flow.
-export const MAX_RESUME_BYTES = 10 * 1024 * 1024; // 10MB
-
-export const ALLOWED_RESUME_EXTENSIONS = [".pdf", ".doc", ".docx"] as const;
-
-const ALLOWED_RESUME_MIME = new Set([
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-]);
+/**
+ * File constraints for the Submit Resume flow.
+ *
+ * These are RE-EXPORTS, not definitions. The values live in
+ * `worker/src/limits.ts` because the Worker re-validates every upload and its
+ * copy is the authoritative one — a client can bypass everything in this file.
+ * Keeping a second hardcoded copy here is how the form ends up promising a limit
+ * the server does not honour, so do not inline them back.
+ */
+export {
+  ALLOWED_RESUME_EXTENSIONS,
+  MAX_RESUME_BYTES,
+} from "../worker/src/limits";
 
 // ---------------------------------------------------------------------------
 // Reusable primitives.
 // ---------------------------------------------------------------------------
 
-const requiredString = (label: string) =>
-  z
-    .string({ required_error: `${label} is required` })
-    .trim()
-    .min(1, `${label} is required`);
+/**
+ * The shared per-field length cap, expressed for the form.
+ *
+ * The Worker enforces the same limit in BYTES, and the request-size ceiling it
+ * uses is derived from it. If the form does not enforce this, that ceiling stops
+ * being a bound and a legitimate submission can be refused before it is parsed.
+ * `MAX_TEXT_FIELD_CHARS` is the byte cap divided by the widest possible UTF-8
+ * code point, so this rule is provably the stricter of the two.
+ */
+const withinLengthCap = (label: string) => (schema: z.ZodString) =>
+  schema.max(MAX_TEXT_FIELD_CHARS, `${label} is too long`);
 
-const workEmail = z
-  .string({ required_error: "Work email is required" })
-  .trim()
-  .min(1, "Work email is required")
-  .email("Enter a valid work email address");
+const requiredString = (label: string) =>
+  withinLengthCap(label)(
+    z
+      .string({ required_error: `${label} is required` })
+      .trim()
+      .min(1, `${label} is required`),
+  );
+
+const workEmail = withinLengthCap("Work email")(
+  z
+    .string({ required_error: "Work email is required" })
+    .trim()
+    .min(1, "Work email is required")
+    .email("Enter a valid work email address"),
+);
 
 // Phone is intentionally loose: optional, any non-empty free-form string is fine.
 const optionalPhone = z
   .string()
   .trim()
+  .max(MAX_TEXT_FIELD_CHARS, "Phone is too long")
   .optional()
   .transform((value) => (value === "" ? undefined : value));
 
@@ -94,12 +123,17 @@ const resumeFile = z
   })
   .refine((file) => file.size > 0, "Please upload your resume")
   .refine((file) => file.size <= MAX_RESUME_BYTES, "File must be 10MB or less")
-  .refine((file) => {
-    const name = file.name.toLowerCase();
-    const extOk = ALLOWED_RESUME_EXTENSIONS.some((ext) => name.endsWith(ext));
-    const mimeOk = file.type === "" || ALLOWED_RESUME_MIME.has(file.type);
-    return extOk && mimeOk;
-  }, "Resume must be a PDF or Word document");
+  // The name rides inside the multipart envelope the Worker's size ceiling
+  // accounts for, so it is bounded on both sides rather than just one.
+  .refine(
+    (file) => utf8ByteLength(file.name) <= MAX_FILE_NAME_BYTES,
+    "File name is too long",
+  )
+  .refine(
+    (file) =>
+      hasAllowedResumeExtension(file.name) && isAllowedResumeMimeType(file.type),
+    "Resume must be a PDF or Word document",
+  );
 
 export const resumeFileSchema = z.preprocess(normalizeResumeFile, resumeFile);
 

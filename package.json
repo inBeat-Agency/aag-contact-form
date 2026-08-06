@@ -8,9 +8,12 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "npm run test:widget && npm run test:worker",
+    "test:widget": "vitest run",
+    "test:worker": "node scripts/test-worker.mjs",
     "test:watch": "vitest",
-    "zapier:samples": "tsx scripts/send-zapier-samples.ts"
+    "zapier:samples": "tsx scripts/send-zapier-samples.ts",
+    "erase:candidate": "tsx scripts/erase-candidate.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
@@ -20,6 +23,8 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.0",
+    "@cloudflare/workers-types": "4.20260702.1",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "16.3.2",
     "@testing-library/user-event": "14.6.1",
@@ -27,6 +32,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "aws4fetch": "1.0.20",
     "jsdom": "25.0.1",
     "tsx": "4.23.1",
     "typescript": "^5.6.3",

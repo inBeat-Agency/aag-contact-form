@@ -5,8 +5,6 @@ import {
   SUBMIT_TIMEOUT_MS,
 } from "./submit";
 import type { ContactFormFields } from "./schema";
-import { INQUIRY_TYPES } from "./schema";
-import { ZAPIER_PAYLOAD_KEYS } from "../worker/src/payload";
 
 // A fully-populated fields object; individual tests override what they exercise.
 function makeFields(
@@ -28,6 +26,16 @@ function makeFields(
     website: "",
     ...overrides,
   };
+}
+
+/** Read a Blob's text. jsdom's File has no `.text()`, so go through FileReader. */
+function readText(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => resolve(String(reader.result));
+    reader.readAsText(blob);
+  });
 }
 
 // Build a FileList-like object around a single File (jsdom has no constructor).
@@ -124,6 +132,18 @@ describe("buildFormData", () => {
 describe("submitContactForm", () => {
   const fetchMock = vi.fn();
 
+  /** The exact URL the Worker hands back for a stored resume. */
+  const WORKER_RESUME_URL =
+    "https://resume.test/resume/3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
+  /** A Worker-shaped success response: 2xx AND an explicit `ok: true`. */
+  function workerSuccess(resumeUrl = ""): Response {
+    return new Response(JSON.stringify({ ok: true, resumeUrl }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
   beforeEach(() => {
     fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);
@@ -140,22 +160,21 @@ describe("submitContactForm", () => {
     return fetchMock.mock.calls[0][1] as RequestInit;
   }
 
-  /** The URL-encoded body the widget actually sent. */
-  function lastBody(): URLSearchParams {
+  /** The multipart body the widget actually sent. */
+  function lastBody(): FormData {
     const { body } = lastInit();
-    expect(body).toBeInstanceOf(URLSearchParams);
-    return body as URLSearchParams;
+    expect(body).toBeInstanceOf(FormData);
+    return body as FormData;
   }
 
   async function send(
     fields: Partial<ContactFormFields> = {},
     source: string | null = "src",
   ) {
-    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+    fetchMock.mockResolvedValue(workerSuccess());
     return submitContactForm(
       "https://example.test/submit",
       buildFormData(makeFields(fields), source),
-      { submittedAt: "2026-07-30T14:18:41.000Z" },
     );
   }
 
@@ -163,7 +182,7 @@ describe("submitContactForm", () => {
     expect(SUBMIT_TIMEOUT_MS).toBe(60_000);
   });
 
-  it("POSTs a URL-encoded body (not FormData, not JSON) with a signal", async () => {
+  it("POSTs the FormData instance untouched (not URL-encoded, not JSON)", async () => {
     await send();
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -171,17 +190,27 @@ describe("submitContactForm", () => {
     expect(init.method).toBe("POST");
     expect(init.signal).toBeInstanceOf(AbortSignal);
 
-    // Zapier discards multipart and still answers 200, so FormData here would
-    // look like success while dropping the lead.
-    expect(init.body).not.toBeInstanceOf(FormData);
-    // A JSON string body would need a Content-Type Zapier can't be given.
-    expect(typeof init.body).not.toBe("string");
-    expect(init.body).toBeInstanceOf(URLSearchParams);
+    // The Worker parses multipart. Anything else drops the resume binary.
+    expect(init.body).toBeInstanceOf(FormData);
+  });
+
+  it("hands fetch the very same FormData object it was given, unwrapped", async () => {
+    const built = buildFormData(makeFields(), "src");
+    fetchMock.mockResolvedValue(workerSuccess());
+
+    await submitContactForm("https://example.test/submit", built);
+
+    // Identity, not shape: proves nothing re-encoded or copied the body on the
+    // way out, which is how the resume binary used to get lost.
+    expect(lastInit().body).toBe(built);
   });
 
   // THE guard. Setting Content-Type by hand — even to the exact value the
-  // browser would pick — makes the request preflighted, and Zapier never
-  // answers the OPTIONS. If this test goes red, submissions die in the browser.
+  // browser would pick — makes the request preflighted. It survives the move to
+  // the Worker for a different reason than it was written for: multipart is
+  // CORS-safelisted, so leaving the header alone means no OPTIONS ever fires,
+  // and the browser writes the multipart boundary itself. Set it here and the
+  // boundary is missing, so the Worker cannot parse a single field.
   it("never sets a Content-Type header (browser must set it from the body)", async () => {
     await send();
 
@@ -195,31 +224,7 @@ describe("submitContactForm", () => {
     expect(headerish).toEqual([]);
   });
 
-  it.each(INQUIRY_TYPES)(
-    "sends all 15 contract keys for %s, including the empty ones",
-    async (inquiryType) => {
-      // Deliberately blank every optional field: empty must still ship the key.
-      await send({
-        inquiryType: inquiryType as ContactFormFields["inquiryType"],
-        title: "",
-        company: "",
-        phone: "",
-        companySize: "",
-        estimatedBudget: "",
-        expectedTimeline: "",
-      });
-
-      const body = lastBody();
-      expect([...body.keys()].sort()).toEqual([...ZAPIER_PAYLOAD_KEYS].sort());
-      for (const key of ZAPIER_PAYLOAD_KEYS) {
-        expect(body.has(key), `missing contract key "${key}"`).toBe(true);
-        expect(typeof body.get(key), `"${key}" must be a string`).toBe("string");
-      }
-      expect(body.get("inquiryType")).toBe(inquiryType);
-    },
-  );
-
-  it("encodes the populated engagement fields and the injected timestamp", async () => {
+  it("sends the typed engagement fields as multipart parts", async () => {
     await send();
 
     const body = lastBody();
@@ -228,65 +233,196 @@ describe("submitContactForm", () => {
     expect(body.get("title")).toBe("Head of Talent");
     expect(body.get("estimatedBudget")).toBe("$50K \u2013 $150K");
     expect(body.get("source")).toBe("src");
-    expect(body.get("submittedAt")).toBe("2026-07-30T14:18:41.000Z");
   });
 
-  it("defaults submittedAt to the clock when the caller injects nothing", async () => {
-    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
-    await submitContactForm(
-      "https://example.test/submit",
-      buildFormData(makeFields(), "src"),
-    );
-
-    const sent = lastBody().get("submittedAt") as string;
-    expect(sent).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
-    expect(new Date(sent).getTime()).not.toBeNaN();
-  });
-
-  it("reports the resume by name with an empty resumeUrl, and never its bytes", async () => {
+  it("carries the resume File itself, bytes intact, to the Worker", async () => {
     const file = new File(["%PDF-1.4 secret resume bytes"], "jane-smith.pdf", {
       type: "application/pdf",
     });
 
     await send({ inquiryType: "Submit Resume", resume: fileListOf(file) });
 
+    const sent = lastBody().get("resume");
+    expect(sent).toBeInstanceOf(File);
+    expect((sent as File).name).toBe("jane-smith.pdf");
+    expect((sent as File).type).toBe("application/pdf");
+    // The bytes must survive the trip: this is the whole reason for multipart.
+    expect(await readText(sent as File)).toBe("%PDF-1.4 secret resume bytes");
+  });
+
+  it("leaves the wire contract to the Worker: no flat payload keys are sent", async () => {
+    await send({
+      inquiryType: "Submit Resume",
+      resume: fileListOf(new File(["cv"], "cv.pdf", { type: "application/pdf" })),
+    });
+
     const body = lastBody();
-    // Honest signal: "a resume arrived, the file is pending". Not a fake URL.
-    expect(body.get("resumeFileName")).toBe("jane-smith.pdf");
-    expect(body.get("resumeUrl")).toBe("");
-
-    // The binary must never reach the wire in a URL-encoded body.
-    expect(body.has("resume")).toBe(false);
-    expect(body.toString()).not.toContain("%25PDF"); // "%PDF", url-encoded
-    expect(decodeURIComponent(body.toString())).not.toContain("%PDF");
-    expect(decodeURIComponent(body.toString())).not.toContain("secret resume");
+    // `resumeUrl`, `resumeFileName` and `submittedAt` are produced server-side by
+    // worker/src/payload.ts. The widget inventing them is what shipped an empty
+    // `resumeUrl` to Zapier for the whole interim.
+    expect(body.has("resumeUrl")).toBe(false);
+    expect(body.has("resumeFileName")).toBe(false);
+    expect(body.has("submittedAt")).toBe(false);
   });
 
-  it("resolves 'success' on a resolved ok response", async () => {
-    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
-    const outcome = await submitContactForm(
+  /* =========================================================================
+   * The success contract (design §4 C2).
+   *
+   * This project exists because a 2xx from an unverified party was treated as
+   * proof of delivery. `response.ok` says a response arrived. `ok: true` says
+   * OUR Worker produced it. Success requires BOTH, and nothing here is
+   * tolerant: a missing `ok` is an error, not a default.
+   * ========================================================================= */
+
+  it("reports error when a 2xx carries an HTML body", async () => {
+    fetchMock.mockResolvedValue(
+      new Response("<!doctype html><h1>Success</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    );
+
+    const result = await submitContactForm(
       "https://example.test/submit",
       new FormData(),
     );
-    expect(outcome).toBe("success");
+
+    expect(result).toEqual({ outcome: "error" });
   });
 
-  it("resolves 'error' on a non-2xx response", async () => {
-    fetchMock.mockResolvedValue(new Response(null, { status: 500 }));
-    const outcome = await submitContactForm(
+  it("reports error when a 2xx body says ok:false", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: false, error: "STORAGE_FAILED" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const result = await submitContactForm(
       "https://example.test/submit",
       new FormData(),
     );
-    expect(outcome).toBe("error");
+
+    expect(result).toEqual({ outcome: "error" });
   });
 
-  it("resolves 'error' on a network rejection without throwing", async () => {
+  it("reports error when a 2xx body is valid JSON with no ok field", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ status: "success", resumeUrl: "https://x" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const result = await submitContactForm(
+      "https://example.test/submit",
+      new FormData(),
+    );
+
+    // A missing `ok` is NOT a default-to-success. Zapier's own 200 body is
+    // {"status":"success"} — exactly this shape.
+    expect(result).toEqual({ outcome: "error" });
+  });
+
+  it("reports success with the Worker's resumeUrl when the body says ok:true", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: true, resumeUrl: WORKER_RESUME_URL }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const result = await submitContactForm(
+      "https://example.test/submit",
+      new FormData(),
+    );
+
+    expect(result).toEqual({
+      outcome: "success",
+      resumeUrl: WORKER_RESUME_URL,
+    });
+  });
+
+  it("reports error when ok:true arrives on a 500", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, resumeUrl: WORKER_RESUME_URL }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const result = await submitContactForm(
+      "https://example.test/submit",
+      new FormData(),
+    );
+
+    // Both conditions are required, in both directions.
+    expect(result).toEqual({ outcome: "error" });
+  });
+
+  it.each([
+    ["a JSON null body", "null"],
+    ["a JSON array body", '[{"ok":true}]'],
+    ["a bare JSON true", "true"],
+    ["a bare JSON string", '"ok"'],
+  ])("reports error for %s on a 2xx", async (_label, raw) => {
+    fetchMock.mockResolvedValue(
+      new Response(raw, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const result = await submitContactForm(
+      "https://example.test/submit",
+      new FormData(),
+    );
+
+    expect(result).toEqual({ outcome: "error" });
+  });
+
+  it("reports success with an empty resumeUrl when the Worker omits one", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const result = await submitContactForm(
+      "https://example.test/submit",
+      new FormData(),
+    );
+
+    // A text-only inquiry has no resume, so no URL. Still a real success.
+    expect(result).toEqual({ outcome: "success", resumeUrl: "" });
+  });
+
+  it("reports success with an empty resumeUrl when the Worker sends a non-string one", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, resumeUrl: 42 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const result = await submitContactForm(
+      "https://example.test/submit",
+      new FormData(),
+    );
+
+    expect(result).toEqual({ outcome: "success", resumeUrl: "" });
+  });
+
+  it("reports error on a network rejection without throwing", async () => {
     fetchMock.mockRejectedValue(new TypeError("network down"));
-    const outcome = await submitContactForm(
+
+    const result = await submitContactForm(
       "https://example.test/submit",
       new FormData(),
     );
-    expect(outcome).toBe("error");
+
+    expect(result).toEqual({ outcome: "error" });
   });
 
   it("aborts the request when the configured timeout elapses", async () => {
@@ -315,7 +451,7 @@ describe("submitContactForm", () => {
     await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS);
 
     expect(capturedSignal?.aborted).toBe(true);
-    // The aborted fetch is caught and surfaced as "error", never thrown.
-    await expect(promise).resolves.toBe("error");
+    // The aborted fetch is caught and surfaced as an error, never thrown.
+    await expect(promise).resolves.toEqual({ outcome: "error" });
   });
 });
