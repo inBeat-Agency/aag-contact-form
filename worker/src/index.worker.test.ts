@@ -1291,6 +1291,47 @@ describe("POST /submit - the resume is persisted to R2 before anything else", ()
     );
   });
 
+  /**
+   * THE HALF OF THE ERASURE BRIDGE THAT LIVES ON THE WORKER SIDE.
+   *
+   * `scripts/erase-candidate.ts` honours a deletion request by recomputing this
+   * hash and matching it. If the two ever disagree the script matches nothing,
+   * reports "0 objects", and a deletion request is filed as honoured while
+   * every CV is still in the bucket — silent from every angle.
+   *
+   * The test above compares the stored value against a helper in this file, and
+   * that helper is a re-implementation: both sides could drift together and
+   * stay green. So this pins the value the Worker ACTUALLY WRITES to a literal
+   * produced by neither implementation — `node:crypto`'s `createHmac`, run
+   * outside this suite:
+   *
+   *   crypto.createHmac("sha256", "test-erasure-salt-91b7de")
+   *         .update("jane.doe@example.com", "utf8").digest("hex")
+   *
+   * `scripts/erase-candidate.test.ts` pins the SAME literal against the script's
+   * side. Neither file imports it from the other. That is what makes drift
+   * between the Worker and the erasure tool impossible to ship green.
+   *
+   * The submitted address is `  Jane.Doe@Example.COM  ` — padded and mixed case
+   * — so this also pins the normalisation. Without the trim the digest is
+   * 7fd36e43…; without the lower-casing it is f4f25030…. Neither is below.
+   */
+  it("stores the digest an independent HMAC implementation computes", async () => {
+    await postForm(resumeSubmission());
+
+    const { metadata } = await storedObject();
+    expect(metadata.subjectHash).toBe(
+      "b69ad1bda66ba89c297fcc4477d8758c6499d0f6b393b3cce168d68b25a07013",
+    );
+  });
+
+  /** The literal above is only meaningful while the binding it was computed
+   * under still holds that value. Pinned separately so a config edit names
+   * itself instead of turning the assertion above into a mystery. */
+  it("pins the salt binding the stored digest was computed under", () => {
+    expect(env.ERASURE_SALT).toBe("test-erasure-salt-91b7de");
+  });
+
   /** Erasure is driven by matching this hash, so two spellings of one address
    * must collapse to one value or a deletion request silently misses objects. */
   it("normalises case and surrounding whitespace before hashing the email", async () => {

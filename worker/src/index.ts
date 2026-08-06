@@ -45,6 +45,10 @@ import {
   withinRateLimit,
   type RateLimiter,
 } from "./rate-limit";
+// Shared with `scripts/erase-candidate.ts` on purpose. The tool that honours a
+// deletion request finds objects by recomputing this hash, so a second copy of
+// it would be a deletion that silently matches nothing. See ./subject-hash.
+import { computeSubjectHash } from "./subject-hash";
 
 export interface Env {
   RESUMES: R2Bucket;
@@ -364,37 +368,6 @@ async function validateResume(file: File): Promise<ErrorCode | null> {
   if (!hasAllowedResumeMagicBytes(head)) return "UNSUPPORTED_FILE_TYPE";
 
   return null;
-}
-
-/**
- * Candidate-level erasure index: `HMAC-SHA-256(normalised email, ERASURE_SALT)`.
- *
- * Storing the address itself would put PII in object metadata; storing a plain
- * digest would let anyone confirm a guessed address. The salted HMAC lets us
- * answer "delete everything belonging to this person" by recomputing the hash
- * and matching it, and is reversible only to whoever holds the salt.
- *
- * Case and surrounding whitespace are normalised first, or the same person
- * typing their address differently on two submissions produces two hashes and a
- * deletion request silently misses one of them.
- */
-async function computeSubjectHash(email: string, salt: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(salt),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    encoder.encode(email.trim().toLowerCase()),
-  );
-  return [...new Uint8Array(signature)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 /**

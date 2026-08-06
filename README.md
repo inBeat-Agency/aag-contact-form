@@ -61,6 +61,9 @@ npm run test      # run the widget + Zapier payload contract tests (vitest)
 `npm run zapier:samples` is a manual tool, not part of the test run — see
 [Zapier delivery](#zapier-delivery-why-a-worker-sits-in-the-middle).
 
+`npm run erase:candidate` honours a candidate's deletion request — see
+[Resume retention and erasure](#resume-retention-and-erasure).
+
 `npm run dev` serves `index.html`, which mounts the widget in a full-page panel
 and mocks the backend so submissions resolve locally (watch the console for the
 captured `FormData`). The mock answers `{"ok":true}` — a bare `200` would render
@@ -308,6 +311,68 @@ An over-budget caller gets `429` with `{"error":"RATE_LIMITED"}` and a
 **widget can read it** — a 429 the browser hides is indistinguishable from a
 network error, and this widget's response to that is the candidate submitting
 again, turning one refusal into duplicate leads.
+
+### Resume retention and erasure
+
+**Retention is indefinite, by decision.** Stored CVs do not expire and there is
+deliberately **no R2 lifecycle rule**. An automatic expiry would delete resumes
+the client still needs, and nobody would find out until the day they went
+looking for one. Deletion is **manual and on request**.
+
+That decision is only defensible if the deletion is actually executable, which
+is why `scripts/erase-candidate.ts` exists. R2 keys here are opaque UUIDs —
+chosen so that a key reveals nothing about the person — so without the tool
+nobody can answer "delete my data" at all. **The retention policy and the script
+are one decision, not two.**
+
+**Who runs it.** Whoever handles the request, from a checkout of this repo, on a
+machine that already has the R2 credentials. It is not deployed and nothing
+calls it automatically.
+
+**What it needs** — four environment variables, none with a default, none
+committed:
+
+| Variable | What it is |
+|---|---|
+| `ERASURE_SALT` | the **same** value as the Worker secret of that name |
+| `R2_ACCOUNT_ID` | Cloudflare account id |
+| `R2_ACCESS_KEY_ID` | R2 API token (S3 credentials), object read + delete |
+| `R2_SECRET_ACCESS_KEY` | — |
+
+`ERASURE_SALT` is the one that matters most. The script finds a candidate's
+objects by recomputing the salted HMAC the Worker stored on them, so a *different*
+salt produces well-formed digests that match nothing — and the run would
+otherwise report a clean erasure of zero objects. If it is unset the script
+**refuses to run and says why**; if it is merely wrong, the zero-match exit
+below is the backstop.
+
+**How to run it:**
+
+```bash
+# 1. DRY RUN (the default). Lists what would be deleted. Changes nothing.
+ERASURE_SALT=… R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… \
+  npm run erase:candidate -- someone@example.com
+
+# 2. Read the report. Then, and only then:
+ERASURE_SALT=… R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… \
+  npm run erase:candidate -- someone@example.com --confirm
+```
+
+The report prints each matched object's key, `submittedAt` and
+`originalFileName`, because a UUID alone tells a human nothing — those two
+fields are what let you recognise the person you meant before destroying
+anything.
+
+**A zero-match run exits non-zero, on purpose.** "0 objects deleted" has two
+causes and the script cannot tell them apart: the candidate genuinely has
+nothing stored, or the salt does not match what the Worker signed with and every
+CV is still there. It refuses to report success for either, so a deletion
+request is never filed as honoured on the strength of a run that found nothing.
+
+The subject hash itself lives in `worker/src/subject-hash.ts` and is **imported**
+by both the Worker and the script — never reimplemented. Both test suites pin
+its output to the same independently computed digest so the two cannot drift
+apart silently.
 
 ### Cutover checklist
 

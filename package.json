@@ -12,7 +12,8 @@
     "test:widget": "vitest run",
     "test:worker": "node scripts/test-worker.mjs",
     "test:watch": "vitest",
-    "zapier:samples": "tsx scripts/send-zapier-samples.ts"
+    "zapier:samples": "tsx scripts/send-zapier-samples.ts",
+    "erase:candidate": "tsx scripts/erase-candidate.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
@@ -31,6 +32,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "aws4fetch": "1.0.20",
     "jsdom": "25.0.1",
     "tsx": "4.23.1",
     "typescript": "^5.6.3",
