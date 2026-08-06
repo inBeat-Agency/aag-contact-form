@@ -39,6 +39,62 @@ workers_dev = true
 binding = "RESUMES"
 bucket_name = "aag-resumes"
 
+# ---------------------------------------------------------------------------
+# RATE LIMITING - Cloudflare's NATIVE binding, one budget per public route.
+#
+# WHY THE BINDING AND NOT A WAF RULE. A WAF rate limiting rule is configured per
+# ZONE, and this Worker is served from workers.dev because the custom domain is
+# still an open question (design D6). We control no zone, so that route is not
+# available. This binding needs no zone, no KV and no Durable Object, it works on
+# workers.dev today, and it keeps working unchanged after the domain migration.
+#
+# READ THIS BEFORE TRUSTING THESE NUMBERS - THE LIMIT IS PER CLOUDFLARE LOCATION,
+# NOT GLOBAL. Cloudflare counts these at the colo that served the request. A
+# client whose traffic lands in one colo sees the limit below; an attacker spread
+# across N colos gets N times the ceiling, and Cloudflare runs hundreds of them.
+#
+# So this mitigates CASUAL abuse - one script on one machine, a stranger with
+# curl, an accidental retry loop in someone's integration - and it does NOT stop
+# a serious distributed attack. Nothing downstream should assume otherwise. If
+# that threat ever becomes real the answer is a zone plus a WAF rule, not a
+# smaller number here.
+#
+# `period` accepts ONLY 10 or 60. Any other value is rejected at deploy time.
+#
+# The two namespace_id values MUST DIFFER. They are what separates the budgets:
+# sharing one would let a burst of form spam lock staff out of every CV they need
+# to read that morning - one endpoint's abuse taking down an unrelated one.
+#
+# `worker/wrangler.config.test.ts` pins every number and id below as hand-typed
+# literals, and asserts them against the constants in `worker/src/rate-limit.ts`
+# where the reasoning lives. Edit one side without the other and the suite goes
+# red naming the drift, which is the only reason the comments in that file can be
+# trusted to describe the limits this Worker actually has.
+
+# POST /submit - 20 per 60s per client.
+#
+# DELIBERATELY GENEROUS. A corporate NAT puts a whole office behind ONE address,
+# so several recruiters at one client company share this budget. A limit tuned to
+# a single human refuses real candidates, and a refused candidate is a lead lost
+# SILENTLY - they see an error, give up, and nothing records that they existed.
+# That is the failure this entire Worker was built to eliminate, so the number
+# sits far above plausible human traffic and still far below what a script does.
+[[ratelimits]]
+name = "SUBMIT_LIMITER"
+namespace_id = "1001"
+simple = { limit = 20, period = 60 }
+
+# GET /resume/<key> - 60 per 60s per client.
+#
+# Larger because this route is BROWSED, not submitted: a staff member working
+# through a morning's applications legitimately opens many CVs in a few minutes,
+# all from the same office address. It exists to cap credential guessing and key
+# enumeration, both of which need far more than 60 attempts to be worth anything.
+[[ratelimits]]
+name = "RESUME_LIMITER"
+namespace_id = "1002"
+simple = { limit = 60, period = 60 }
+
 [vars]
 # Comma-separated ALLOWLIST of origins allowed to read a /submit response. The
 # Worker echoes back the caller's OWN origin when it appears here, and emits no

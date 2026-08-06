@@ -262,6 +262,53 @@ single field. Leaving it alone also keeps the request CORS-safelisted, so no
 preflight `OPTIONS` ever fires. `src/submit.test.ts` guards this explicitly, and
 it is the single most breakable line in the transport.
 
+### Rate limiting
+
+Both public routes carry a per-client request budget, enforced by Cloudflare's
+**native rate limiting binding** declared in `worker/wrangler.toml`.
+
+| Route | Budget | Counted against |
+|---|---|---|
+| `POST /submit` | 20 per 60s | `CF-Connecting-IP` |
+| `GET /resume/<key>` | 60 per 60s | `CF-Connecting-IP` |
+
+The binding was chosen over a WAF rate limiting rule because a WAF rule is
+configured **per zone**, and this Worker is served from `workers.dev` while the
+custom domain is still undecided. The binding needs no zone, no KV and no
+Durable Object.
+
+**The limits are deliberately generous.** A corporate NAT puts a whole office
+behind one address, so several recruiters at one client company share a budget.
+A limit tuned to a single human refuses real candidates — and a refused
+candidate is a lead lost *silently*, which is the failure this Worker exists to
+eliminate. Over-blocking costs more here than under-blocking.
+
+**Know what this does not do.** Cloudflare counts these **per location, not
+globally**. An attacker spread across N colos gets N times the ceiling. This
+raises the cost of casual abuse — one script, one machine, a runaway retry loop
+— and it does **not** stop a serious distributed attack. If that ever becomes
+the threat, the answer is a zone plus a WAF rule, not a smaller number here.
+
+Two further decisions worth knowing before changing anything on this path:
+
+- **It fails open.** A limiter that is missing or throwing allows the request.
+  A limiter outage that blocked `/submit` would lose every lead arriving during
+  it, unrecoverably and silently; one that allows requests through costs only
+  the protection. Those costs are not comparable. (Note this is the *opposite*
+  of the `/resume` credential, which fails closed — a missing credential
+  publishes candidate PII, a missing limiter publishes nothing.)
+- **A request with no `CF-Connecting-IP` is counted, not exempted.** Cloudflare
+  always sets that header on edge traffic, so an absent one means a service
+  binding or local dev rather than a stranger. Those requests share a single
+  sentinel budget: not exempt (which would make "send no header" an unlimited
+  bypass) and not refused (which on `/submit` would be a lost lead).
+
+An over-budget caller gets `429` with `{"error":"RATE_LIMITED"}` and a
+`Retry-After` header. On `/submit` the refusal carries the CORS echo so the
+**widget can read it** — a 429 the browser hides is indistinguishable from a
+network error, and this widget's response to that is the candidate submitting
+again, turning one refusal into duplicate leads.
+
 ### Cutover checklist
 
 Ordered. Every intermediate state is safe; running these out of order is not.

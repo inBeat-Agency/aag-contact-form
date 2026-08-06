@@ -4,6 +4,12 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  RATE_LIMIT_WINDOW_SECONDS,
+  RESUME_RATE_LIMIT_PER_MINUTE,
+  SUBMIT_RATE_LIMIT_PER_MINUTE,
+} from "./src/rate-limit";
+
 /**
  * The deploy config and the test runtime must agree on compatibility date.
  *
@@ -107,5 +113,136 @@ describe("worker allowed origins", () => {
       AAG_PRODUCTION_ORIGIN,
       AAG_STAGING_ORIGIN,
     ]);
+  });
+});
+
+type ConfiguredRateLimit = {
+  name: string;
+  namespaceId: string;
+  limit: number;
+  period: number;
+};
+
+/**
+ * Every `[[ratelimits]]` block in the deploy config, in declaration order.
+ *
+ * Comment lines are stripped before parsing. The block above these declarations
+ * talks about limits and periods in prose, and a regex that reads a number out
+ * of a comment would happily assert that the documentation is correct while the
+ * shipped value is anything at all.
+ */
+function configuredRateLimits(): ConfiguredRateLimit[] {
+  const withoutComments = deployConfig()
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+
+  return withoutComments
+    .split(/^\[\[ratelimits\]\]\s*$/m)
+    .slice(1)
+    .map((block) => {
+      // Stop at the next table header so one block cannot read the next one's
+      // keys when a field is missing.
+      const body = block.split(/^\[/m)[0] ?? "";
+      return {
+        name: /^name\s*=\s*"([^"]*)"/m.exec(body)?.[1] ?? "<missing>",
+        namespaceId:
+          /^namespace_id\s*=\s*"([^"]*)"/m.exec(body)?.[1] ?? "<missing>",
+        limit: Number(/\blimit\s*=\s*(\d+)/.exec(body)?.[1] ?? NaN),
+        period: Number(/\bperiod\s*=\s*(\d+)/.exec(body)?.[1] ?? NaN),
+      };
+    });
+}
+
+/**
+ * THE REQUEST BUDGETS THAT ACTUALLY SHIP, WRITTEN OUT BY HAND.
+ *
+ * The runtime suite proves the MECHANISM — a client inside its budget is served,
+ * the one past it gets 429 with `Retry-After`, and the two routes do not share a
+ * counter. It cannot prove the NUMBERS, because it reads the same bindings the
+ * Worker does. Change `limit = 20` to `limit = 0` in `worker/wrangler.toml` and
+ * a suite that derives its expectations from the binding stays green while the
+ * public form refuses every candidate who ever finds it.
+ *
+ * So the numbers are typed again here, deliberately not imported, not parsed out
+ * of the file under test, and not shared with the runtime suite. This is the
+ * only place the deployment promise and the deployed value can be seen to
+ * disagree.
+ */
+describe("worker rate limiting", () => {
+  const SUBMIT_LIMITER_NAME = "SUBMIT_LIMITER";
+  const RESUME_LIMITER_NAME = "RESUME_LIMITER";
+  const SUBMIT_LIMITER_NAMESPACE = "1001";
+  const RESUME_LIMITER_NAMESPACE = "1002";
+  const SUBMIT_REQUESTS_PER_WINDOW = 20;
+  const RESUME_REQUESTS_PER_WINDOW = 60;
+  const WINDOW_SECONDS = 60;
+
+  /**
+   * Asserted as a complete ordered list rather than "contains". A missing block
+   * means the route it belonged to ships with NO limit at all — and the Worker
+   * fails open by design, so nothing at runtime would say so.
+   */
+  it("declares exactly the two budgets the Worker reads, and nothing else", () => {
+    expect(configuredRateLimits()).toEqual([
+      {
+        name: SUBMIT_LIMITER_NAME,
+        namespaceId: SUBMIT_LIMITER_NAMESPACE,
+        limit: SUBMIT_REQUESTS_PER_WINDOW,
+        period: WINDOW_SECONDS,
+      },
+      {
+        name: RESUME_LIMITER_NAME,
+        namespaceId: RESUME_LIMITER_NAMESPACE,
+        limit: RESUME_REQUESTS_PER_WINDOW,
+        period: WINDOW_SECONDS,
+      },
+    ]);
+  });
+
+  /**
+   * Two namespaces, or the budgets are one budget. Shared, a burst of form spam
+   * locks staff out of every CV they need to read that morning — one endpoint's
+   * abuse taking down an unrelated one, which is exactly what splitting the
+   * limiters was for.
+   */
+  it("keeps the two budgets in separate namespaces", () => {
+    const namespaces = configuredRateLimits().map(
+      (entry) => entry.namespaceId,
+    );
+
+    expect(new Set(namespaces).size).toBe(namespaces.length);
+  });
+
+  /**
+   * THE BRIDGE BETWEEN THE NUMBERS AND THE REASONING.
+   *
+   * `worker/src/rate-limit.ts` explains at length WHY these limits are generous
+   * — the corporate NAT, the silent lead loss — but it does not enforce
+   * anything: the binding does. Without this assertion that file is a comment
+   * describing limits the Worker might not have, and a reader would trust it.
+   */
+  it("ships the numbers the Worker's own constants document", () => {
+    expect({
+      submit: SUBMIT_RATE_LIMIT_PER_MINUTE,
+      resume: RESUME_RATE_LIMIT_PER_MINUTE,
+      window: RATE_LIMIT_WINDOW_SECONDS,
+    }).toEqual({
+      submit: SUBMIT_REQUESTS_PER_WINDOW,
+      resume: RESUME_REQUESTS_PER_WINDOW,
+      window: WINDOW_SECONDS,
+    });
+  });
+
+  /**
+   * Cloudflare accepts ONLY 10 or 60 for `period`. Anything else is rejected at
+   * deploy time — which is a fine place to find out, except that the deploy in
+   * question is usually the one shipping something else entirely.
+   */
+  it("requests a window the platform actually accepts", () => {
+    const periods = configuredRateLimits().map((entry) => entry.period);
+
+    expect(periods).toEqual(periods.map(() => WINDOW_SECONDS));
+    expect([10, 60]).toContain(WINDOW_SECONDS);
   });
 });

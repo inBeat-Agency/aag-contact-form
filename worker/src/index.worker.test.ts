@@ -1,5 +1,5 @@
 import {
-  SELF,
+  SELF as EDGE,
   createExecutionContext,
   env,
   fetchMock,
@@ -13,7 +13,7 @@ import consulting from "../fixtures/consulting.json";
 import generalQuestion from "../fixtures/general-question.json";
 import recruitmentHiring from "../fixtures/recruitment-hiring.json";
 import submitResume from "../fixtures/submit-resume.json";
-import worker, { type Env } from "./index";
+import rawWorker, { type Env } from "./index";
 import {
   INQUIRY_TYPES,
   MAX_FILE_NAME_BYTES,
@@ -38,6 +38,8 @@ import type { ZapierPayload } from "./payload";
 declare module "cloudflare:test" {
   interface ProvidedEnv {
     RESUMES: R2Bucket;
+    SUBMIT_LIMITER: RateLimiterLike;
+    RESUME_LIMITER: RateLimiterLike;
     ALLOWED_ORIGINS: string;
     RESUME_HOST: string;
     RESUME_URL_BASE: string;
@@ -50,6 +52,97 @@ declare module "cloudflare:test" {
 }
 
 const ORIGIN = "https://worker.test";
+
+/**
+ * The shape of a Cloudflare rate limiting binding, restated for the test env.
+ *
+ * Declared here rather than imported from the Worker so a change to the
+ * Worker's own narrowing cannot silently redefine what these tests believe a
+ * limiter is.
+ */
+type RateLimiterLike = {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+};
+
+/**
+ * THE HEADER THE RATE LIMITER COUNTS AGAINST, AND WHY EVERY TEST BELOW GETS ITS
+ * OWN VALUE.
+ *
+ * The two rate-limit bindings declared in `worker/wrangler.toml` are REAL in
+ * this suite — `@cloudflare/vitest-pool-workers` reads that file, so Miniflare
+ * binds actual limiters with the actual shipped limits, and there is no way to
+ * override them from `vitest.worker.config.ts` (the pool rejects a `ratelimits`
+ * option outright). That fidelity is worth having: these tests exercise the
+ * binding that ships rather than a stand-in for it.
+ *
+ * It also means all 200-odd tests in this file share one counting bucket unless
+ * something separates them, and `/submit` allows 20 requests per minute. The
+ * whole suite runs inside a single 60-second window, so without this shim the
+ * twenty-first unrelated test would start failing with 429 — and which twenty
+ * survived would depend on file order. That is a flaky suite, not a signal.
+ *
+ * So every request issued through {@link SELF} or {@link worker} gets a unique
+ * client identifier unless the test set one deliberately. A test that WANTS to
+ * observe the limit pins the header itself and thereby claims a private bucket.
+ *
+ * The value is deliberately NOT a plausible IP address. The Worker treats this
+ * header as an opaque key and never parses it, and writing `test-client-7`
+ * instead of `198.51.100.7` keeps a reader from assuming a parse that does not
+ * exist. Uniqueness is what matters, and a counter cannot collide the way a
+ * modulo'd octet would.
+ */
+const CLIENT_IP_HEADER = "CF-Connecting-IP";
+
+let testClientCounter = 0;
+
+function nextTestClient(): string {
+  testClientCounter += 1;
+  return `test-client-${testClientCounter}`;
+}
+
+function withTestClientInit(init?: RequestInit): RequestInit {
+  const headers = new Headers(
+    (init?.headers as HeadersInit | undefined) ?? undefined,
+  );
+  if (!headers.has(CLIENT_IP_HEADER)) {
+    headers.set(CLIENT_IP_HEADER, nextTestClient());
+  }
+  return { ...init, headers };
+}
+
+/**
+ * `SELF`, but every request carries a client identifier.
+ *
+ * Shadowing the import rather than editing ~24 call sites keeps this isolation
+ * in ONE place with ONE explanation. A test that pins the header explicitly is
+ * passed through untouched.
+ */
+const SELF = {
+  fetch: (input: string, init?: RequestInit): Promise<Response> =>
+    EDGE.fetch(input, withTestClientInit(init)),
+};
+
+/**
+ * The Worker's default export, with the same per-request client identifier.
+ *
+ * `rawWorker` stays importable and is used deliberately by the tests that need
+ * a request with NO client header at all — the platform-shaped case the Worker
+ * has to have an answer for.
+ */
+const worker = {
+  fetch: (
+    request: Request,
+    workerEnv: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> => {
+    if (request.headers.has(CLIENT_IP_HEADER)) {
+      return rawWorker.fetch(request, workerEnv, ctx);
+    }
+    const headers = new Headers(request.headers);
+    headers.set(CLIENT_IP_HEADER, nextTestClient());
+    return rawWorker.fetch(new Request(request, { headers }), workerEnv, ctx);
+  },
+};
 
 /**
  * The resume link the contract promises, WRITTEN OUT BY HAND.
@@ -3399,6 +3492,501 @@ describe("POST /submit is never gated by the resume credential", () => {
     expect(JSON.parse(captured.body ?? "{}")).toMatchObject({
       inquiryType: "Submit Resume",
     });
+  });
+});
+
+/**
+ * An R2 binding that RECORDS what it was asked to WRITE and stores nothing.
+ *
+ * The read-recorder above proves the Worker never reached storage on a refusal;
+ * this proves the same for the write half, which is the expensive one — a
+ * refused submission that still put a file in the bucket would be paying the
+ * full cost of the abuse the limiter exists to stop.
+ */
+function recordingWriteBucket(): { bucket: R2Bucket; writes: string[] } {
+  const writes: string[] = [];
+  return {
+    writes,
+    bucket: {
+      put: (key: string) => {
+        writes.push(key);
+        return Promise.resolve(null);
+      },
+      get: () => Promise.resolve(null),
+    } as unknown as R2Bucket,
+  };
+}
+
+/**
+ * RATE LIMITING ON THE PUBLIC WRITE PATH.
+ *
+ * `/submit` is unauthenticated by design — that is not negotiable, because a
+ * gate here is 100% silent lead loss — so the only thing standing between this
+ * endpoint and a script is a request budget.
+ *
+ * THE LIMITS ARE DELIBERATELY GENEROUS AND THE TESTS BELOW ENCODE THAT. A
+ * corporate NAT puts an entire office behind one address, and this project's
+ * defining failure has always been losing a legitimate lead silently. So the
+ * numbers are set where an abusive script is throttled and a busy real office
+ * never notices, and the assertions here pin the ALLOWED side of that boundary
+ * as carefully as the refused side.
+ *
+ * The limits themselves live in `worker/wrangler.toml` and are pinned as
+ * literals by `worker/wrangler.config.test.ts`. The numbers written out here
+ * are hand-typed for the same reason every other contract literal in this file
+ * is: an expectation computed from the value under test proves only that the
+ * config equals itself.
+ */
+describe("POST /submit — rate limiting", () => {
+  /** Hand-typed. The shipped value is pinned in `wrangler.config.test.ts`. */
+  const SUBMIT_BUDGET = 20;
+
+  /** Spend a whole budget and return nothing — the statuses are asserted by
+   * the tests that care about them. Bodies are drained so a failing assertion
+   * reports itself instead of taking the file down with an open stream. */
+  async function spendSubmitBudget(client: string): Promise<void> {
+    for (let index = 0; index < SUBMIT_BUDGET; index += 1) {
+      const response = await SELF.fetch(`${ORIGIN}/submit`, {
+        method: "POST",
+        headers: { [CLIENT_IP_HEADER]: client },
+      });
+      await response.text();
+    }
+  }
+
+  /**
+   * THE PRESENCE OF A SUCCESS SIGNAL, AND IT COMES FIRST ON PURPOSE.
+   *
+   * Every refusal assertion below is satisfied by a Worker that simply refuses
+   * everything, and a `/submit` that refuses everything is the worst outcome
+   * this repo has a name for. So the first thing proved is that an ordinary
+   * candidate still gets their lead DELIVERED — the 200 is not enough on its
+   * own, the forwarded body is the real signal.
+   */
+  it("delivers a lead normally when the client is inside its budget", async () => {
+    const captured = interceptZapier();
+
+    const response = await SELF.fetch(`${ORIGIN}/submit`, {
+      method: "POST",
+      body: resumeSubmission(),
+      headers: { [CLIENT_IP_HEADER]: "submit-rate-happy-path" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(captured.body ?? "{}")).toMatchObject({
+      inquiryType: "Submit Resume",
+      workEmail: "  Jane.Doe@Example.COM  ",
+    });
+  });
+
+  /**
+   * THE LIMIT, AND THE ORDERING, IN ONE ASSERTION.
+   *
+   * Every request here is BODYLESS, which is what makes this test able to see
+   * the thing it claims to be testing. A bodyless POST is rejected at the
+   * multipart parse with 400 INVALID_SUBMISSION, so:
+   *
+   *   - the first twenty answering 400 proves the limiter ALLOWED them through
+   *     to the parser (a limiter that refuses everything cannot produce this),
+   *   - the twenty-first answering 429 rather than 400 proves the limiter ran
+   *     BEFORE the parse.
+   *
+   * Move the rate check below `request.formData()` and the twenty-first request
+   * throws in the parser first and answers 400, so the exact array below turns
+   * red. That ordering is the whole point of the control: an abusive request
+   * has to cost no parsing, no memory and no CPU.
+   */
+  it("counts every request from one client and refuses the twenty-first, before parsing", async () => {
+    const client = "submit-rate-exhaustion";
+    const statuses: number[] = [];
+
+    for (let index = 0; index <= SUBMIT_BUDGET; index += 1) {
+      const response = await SELF.fetch(`${ORIGIN}/submit`, {
+        method: "POST",
+        headers: { [CLIENT_IP_HEADER]: client },
+      });
+      await response.text();
+      statuses.push(response.status);
+    }
+
+    expect(statuses).toEqual([...Array(SUBMIT_BUDGET).fill(400), 429]);
+  });
+
+  /**
+   * THE REFUSAL HAS TO REACH THE WIDGET, NOT JUST THE NETWORK.
+   *
+   * A 429 the browser withholds from the page is indistinguishable from a
+   * network failure, and this widget's failure mode on an unreadable response
+   * is the candidate submitting again — turning one refusal into duplicate
+   * leads plus a false failure report. So the CORS echo is asserted on this
+   * response specifically, not assumed from the happy path.
+   */
+  it("names RATE_LIMITED, says when to retry, and stays readable by the widget", async () => {
+    const client = "submit-rate-response-shape";
+    await spendSubmitBudget(client);
+
+    const refused = await SELF.fetch(`${ORIGIN}/submit`, {
+      method: "POST",
+      headers: { [CLIENT_IP_HEADER]: client, Origin: AAG_PRODUCTION_ORIGIN },
+    });
+
+    expect(refused.status).toBe(429);
+    await expect(refused.text()).resolves.toBe(
+      '{"ok":false,"error":"RATE_LIMITED"}',
+    );
+    expect(refused.headers.get("Retry-After")).toBe("60");
+    expect(refused.headers.get("Access-Control-Allow-Origin")).toBe(
+      AAG_PRODUCTION_ORIGIN,
+    );
+  });
+
+  /**
+   * The budget belongs to the CLIENT. An implementation that keys the limiter
+   * on a constant — the path, the binding name, an empty string — passes every
+   * other test in this block and takes the whole endpoint down for everyone the
+   * moment one script starts hammering it.
+   */
+  it("charges the budget to the client, not to the endpoint", async () => {
+    const exhausted = "submit-rate-isolation-exhausted";
+    await spendSubmitBudget(exhausted);
+
+    const refused = await SELF.fetch(`${ORIGIN}/submit`, {
+      method: "POST",
+      headers: { [CLIENT_IP_HEADER]: exhausted },
+    });
+    await refused.text();
+    const bystander = await SELF.fetch(`${ORIGIN}/submit`, {
+      method: "POST",
+      headers: { [CLIENT_IP_HEADER]: "submit-rate-isolation-bystander" },
+    });
+    await bystander.text();
+
+    expect([refused.status, bystander.status]).toEqual([429, 400]);
+  });
+
+  /**
+   * A refused request must cost nothing beyond the counter.
+   *
+   * NO ZAPIER INTERCEPTOR IS REGISTERED FOR THIS TEST, DELIBERATELY.
+   * `disableNetConnect()` makes any unmatched outbound call throw, and
+   * `forwardToZapier` catches that and reports 502 FORWARD_FAILED. So a 429
+   * here is positive proof the forward never ran — not an absence assertion.
+   */
+  it("refuses before touching storage or the forward", async () => {
+    const client = "submit-rate-no-side-effects";
+    await spendSubmitBudget(client);
+
+    const { bucket, writes } = recordingWriteBucket();
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+        headers: { [CLIENT_IP_HEADER]: client },
+      }),
+      { ...env, RESUMES: bucket },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    await response.text();
+
+    expect(response.status).toBe(429);
+    expect(writes).toEqual([]);
+  });
+
+  /**
+   * THE MISSING-HEADER DECISION, PROVED IN BOTH DIRECTIONS.
+   *
+   * `CF-Connecting-IP` is set by the Cloudflare edge and overwrites anything a
+   * client sends, so a request that arrives WITHOUT it did not come from a
+   * browser: it came from a service binding, a test harness, or local dev. An
+   * attacker cannot strip a header Cloudflare adds.
+   *
+   * That still leaves two ways to get it wrong, and this test forbids both:
+   *
+   *   - EXEMPTING those requests would make "no header" the one input that buys
+   *     unlimited access, which is a bypass however unreachable it looks today;
+   *   - REFUSING them would be a denial, and on `/submit` a denial is a lost
+   *     lead — the failure this entire Worker exists to eliminate.
+   *
+   * So they are COUNTED, together, under one shared identity. The first twenty
+   * are served (not a denial) and the twenty-first is refused (not an
+   * exemption). A blank header is the same unconfigured caller as an absent
+   * one and must land in the same bucket, or the sentinel is trivially
+   * side-stepped by sending the header empty.
+   *
+   * `rawWorker` is used here precisely because this file's shim gives every
+   * other request a unique client — this is the one place that must be allowed
+   * to arrive bare.
+   */
+  it("counts a client-less request under one shared identity instead of exempting it", async () => {
+    const statuses: number[] = [];
+
+    for (let index = 0; index <= SUBMIT_BUDGET; index += 1) {
+      const ctx = createExecutionContext();
+      const response = await rawWorker.fetch(
+        new Request(`${ORIGIN}/submit`, { method: "POST" }),
+        env,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      await response.text();
+      statuses.push(response.status);
+    }
+
+    expect(statuses).toEqual([...Array(SUBMIT_BUDGET).fill(400), 429]);
+
+    // A blank header is the same unconfigured caller, not a fresh budget.
+    const blank = await SELF.fetch(`${ORIGIN}/submit`, {
+      method: "POST",
+      headers: { [CLIENT_IP_HEADER]: "" },
+    });
+    await blank.text();
+
+    // ...and a real client is untouched by what the shared bucket spent.
+    const named = await SELF.fetch(`${ORIGIN}/submit`, {
+      method: "POST",
+      headers: { [CLIENT_IP_HEADER]: "submit-rate-sentinel-bystander" },
+    });
+    await named.text();
+
+    expect([blank.status, named.status]).toEqual([429, 400]);
+  });
+
+  /**
+   * FAIL OPEN, AND THE ASYMMETRY IS THE REASON.
+   *
+   * A limiter outage that BLOCKS `/submit` loses every lead that arrives during
+   * it, silently and unrecoverably. A limiter outage that ALLOWS requests
+   * through loses nothing except the protection we did not have last week
+   * either. Those two costs are not close, so an unusable limiter must never
+   * be able to take the endpoint down.
+   *
+   * Both shapes of unusable are driven, because they are different bugs: a
+   * binding that was never declared arrives as `undefined`, while a declared
+   * one can still reject at call time.
+   */
+  it("delivers the lead when the limiter binding is missing entirely", async () => {
+    const captured = interceptZapier();
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      { ...env, SUBMIT_LIMITER: undefined as unknown as RateLimiterLike },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(captured.body ?? "{}")).toMatchObject({
+      inquiryType: "Submit Resume",
+    });
+  });
+
+  it("delivers the lead when the limiter itself throws", async () => {
+    const captured = interceptZapier();
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "POST",
+        body: resumeSubmission(),
+      }),
+      {
+        ...env,
+        SUBMIT_LIMITER: {
+          limit: () => Promise.reject(new Error("limiter unavailable")),
+        },
+      },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(captured.body ?? "{}")).toMatchObject({
+      inquiryType: "Submit Resume",
+    });
+  });
+});
+
+/**
+ * RATE LIMITING ON THE DOWNLOAD PATH.
+ *
+ * `/resume` streams candidate PII from behind a SHARED credential, so the two
+ * things worth throttling are credential guessing and key enumeration. The
+ * budget is larger than `/submit`'s because a staff member working through a
+ * morning's applications legitimately clicks many links from one office IP.
+ */
+describe("GET /resume — rate limiting", () => {
+  /** Hand-typed. The shipped value is pinned in `wrangler.config.test.ts`. */
+  const RESUME_BUDGET = 60;
+
+  beforeAll(async () => {
+    await seedResume(STORED_RESUME_KEY);
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  const storedResumeUrl = () => resumeUrl(env.RESUME_HOST, STORED_RESUME_KEY);
+
+  async function spendResumeBudget(client: string): Promise<void> {
+    for (let index = 0; index < RESUME_BUDGET; index += 1) {
+      await probeResume(storedResumeUrl(), {
+        headers: { [CLIENT_IP_HEADER]: client },
+      });
+    }
+  }
+
+  /**
+   * The success signal first, again. A limiter that refuses every download is
+   * a broken feature that every refusal assertion below would happily accept.
+   */
+  it("still streams the stored bytes to an authenticated reader inside the budget", async () => {
+    const download = await probeResume(
+      storedResumeUrl(),
+      authed({ headers: { [CLIENT_IP_HEADER]: "resume-rate-happy-path" } }),
+    );
+
+    expect(download.status).toBe(200);
+    expect(download.bytes).toEqual([...STORED_RESUME_BYTES]);
+  });
+
+  it("counts every probe from one client and refuses the sixty-first", async () => {
+    const client = "resume-rate-exhaustion";
+    const statuses: number[] = [];
+
+    for (let index = 0; index <= RESUME_BUDGET; index += 1) {
+      const probe = await probeResume(storedResumeUrl(), {
+        headers: { [CLIENT_IP_HEADER]: client },
+      });
+      statuses.push(probe.status);
+    }
+
+    expect(statuses).toEqual([...Array(RESUME_BUDGET).fill(401), 429]);
+  });
+
+  /**
+   * THE ORDERING THAT MATTERS MOST ON THIS ROUTE: LIMIT BEFORE CREDENTIAL.
+   *
+   * The credential comparison is deliberately constant-time and deliberately
+   * non-short-circuiting, which makes it expensive by design. Running the
+   * limiter after it would hand an attacker an unlimited supply of comparisons
+   * to measure, which is precisely the channel that hardening was closing.
+   *
+   * The discriminating input is a VALID credential against an exhausted budget.
+   * If the limit ran after the comparison, that request would be authorised and
+   * answer 200 — so the 429 below cannot be produced by an implementation with
+   * the two swapped.
+   *
+   * The spy assertion is only worth something if the spy is live, so the same
+   * spy is then driven by a request that DOES reach the comparison. Twice is
+   * the exact count: the username and password comparisons both always run,
+   * because combining them with `&&` would rebuild a username oracle out of
+   * control flow.
+   */
+  it("refuses before comparing the credential, so probing cannot time the secret", async () => {
+    const client = "resume-rate-before-auth";
+    await spendResumeBudget(client);
+
+    const compare = vi.spyOn(timingSafeSubtle, "timingSafeEqual");
+
+    const refused = await probeResume(
+      storedResumeUrl(),
+      authed({ headers: { [CLIENT_IP_HEADER]: client } }),
+    );
+
+    expect(refused.status).toBe(429);
+    expect(compare).not.toHaveBeenCalled();
+
+    const allowed = await probeResume(
+      storedResumeUrl(),
+      authed({ headers: { [CLIENT_IP_HEADER]: "resume-rate-live-spy-proof" } }),
+    );
+
+    expect(allowed.status).toBe(200);
+    expect(compare).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * HOST LOCK BEFORE LIMIT, for the same reason the host lock comes before the
+   * credential: every other hostname routing to this Worker must behave as
+   * though the route does not exist. A 429 on `*.workers.dev` would announce
+   * that something rate-limited — and therefore something worth finding —
+   * lives at that path, and it would let a stranger burn a real office's
+   * budget from a hostname that should have been a flat 404.
+   */
+  it("applies the host lock before the limit, so a wrong host never spends a budget", async () => {
+    const client = "resume-rate-host-lock-first";
+    const wrongHost: number[] = [];
+
+    for (let index = 0; index <= RESUME_BUDGET; index += 1) {
+      const probe = await probeResume(
+        resumeUrl("worker.test", STORED_RESUME_KEY),
+        { headers: { [CLIENT_IP_HEADER]: client } },
+      );
+      wrongHost.push(probe.status);
+    }
+
+    expect(wrongHost).toEqual(Array(RESUME_BUDGET + 1).fill(404));
+
+    // Same client, correct host. The budget was never touched by the 61
+    // requests above, so this is the ordinary unauthenticated refusal.
+    const onHost = await probeResume(storedResumeUrl(), {
+      headers: { [CLIENT_IP_HEADER]: client },
+    });
+
+    expect(onHost.status).toBe(401);
+  });
+
+  /**
+   * The refusal must stay as silent as the rest of this route. No CORS (W6 — a
+   * CV must never become cross-origin readable, at any status), and no
+   * `WWW-Authenticate`, because a 429 is not a challenge and advertising the
+   * credential prompt here would undo the ordering the test above protects.
+   */
+  it("keeps the 429 free of CORS and of any credential advertisement", async () => {
+    const client = "resume-rate-429-headers";
+    await spendResumeBudget(client);
+
+    const refused = await probeResume(storedResumeUrl(), {
+      headers: { [CLIENT_IP_HEADER]: client, Origin: AAG_PRODUCTION_ORIGIN },
+    });
+
+    expect(refused.status).toBe(429);
+    expect(refused.headerNames).toEqual(["content-type", "retry-after"]);
+    expect(refused.header("Retry-After")).toBe("60");
+  });
+
+  /**
+   * TWO LIMITERS, TWO NAMESPACES.
+   *
+   * A single shared binding would pass most of this file while letting a burst
+   * of form spam lock staff out of every CV they need to read that morning —
+   * one endpoint's abuse taking down an unrelated one. The distinct
+   * `namespace_id` values in `worker/wrangler.toml` are what keep the two
+   * budgets apart, and this is the only test that can see them fail to.
+   */
+  it("does not share a budget with /submit", async () => {
+    const client = "rate-limit-cross-route-isolation";
+
+    for (let index = 0; index <= 20; index += 1) {
+      const response = await SELF.fetch(`${ORIGIN}/submit`, {
+        method: "POST",
+        headers: { [CLIENT_IP_HEADER]: client },
+      });
+      await response.text();
+    }
+
+    const download = await probeResume(
+      storedResumeUrl(),
+      authed({ headers: { [CLIENT_IP_HEADER]: client } }),
+    );
+
+    expect(download.status).toBe(200);
+    expect(download.bytes).toEqual([...STORED_RESUME_BYTES]);
   });
 });
 

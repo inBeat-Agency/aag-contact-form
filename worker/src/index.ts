@@ -39,9 +39,25 @@ import {
   RESUME_MAGIC_BYTE_LENGTH,
   utf8ByteLength,
 } from "./limits";
+import {
+  RATE_LIMIT_WINDOW_SECONDS,
+  rateLimitKey,
+  withinRateLimit,
+  type RateLimiter,
+} from "./rate-limit";
 
 export interface Env {
   RESUMES: R2Bucket;
+  /**
+   * Cloudflare's native rate limiting bindings, one per public route.
+   *
+   * OPTIONAL ON PURPOSE. An undeclared binding arrives as `undefined`, and
+   * {@link withinRateLimit} treats that as "allow" — see the fail-open argument
+   * there. Typing them as required would only move the failure to a place where
+   * it cannot be handled.
+   */
+  SUBMIT_LIMITER?: RateLimiter;
+  RESUME_LIMITER?: RateLimiter;
   /** Comma-separated allowlist. See {@link parseAllowedOrigins}. */
   ALLOWED_ORIGINS: string;
   RESUME_HOST: string;
@@ -72,6 +88,7 @@ export type ErrorCode =
   | "STORAGE_FAILED"
   | "FORWARD_FAILED"
   | "UNAUTHORIZED"
+  | "RATE_LIMITED"
   | "NOT_FOUND";
 
 const ERROR_STATUS: Record<ErrorCode, number> = {
@@ -81,10 +98,24 @@ const ERROR_STATUS: Record<ErrorCode, number> = {
   STORAGE_FAILED: 502,
   FORWARD_FAILED: 502,
   UNAUTHORIZED: 401,
+  RATE_LIMITED: 429,
   NOT_FOUND: 404,
 };
 
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" };
+
+/**
+ * How long a throttled caller should wait before trying again.
+ *
+ * A 429 with no `Retry-After` tells a client only that it failed, so a naive
+ * widget retries immediately and a determined one hammers the endpoint it was
+ * just asked to leave alone. The value is the limiter's own window, read from
+ * the same constant the binding's `period` is asserted against, so the number
+ * cannot promise a reset that has not happened yet.
+ */
+const RETRY_AFTER_HEADERS: Record<string, string> = {
+  "Retry-After": String(RATE_LIMIT_WINDOW_SECONDS),
+};
 
 /**
  * Split the comma-separated allowlist into origins.
@@ -528,7 +559,33 @@ async function forwardToZapier(
 async function handleSubmit(request: Request, env: Env): Promise<Routed> {
   const cors = corsHeaders(request, env);
 
-  // FIRST, ahead of parsing, storage and network. A deploy that cannot deliver a
+  /**
+   * THE RATE LIMIT RUNS BEFORE EVERYTHING, AND "BEFORE THE PARSE" IS THE POINT.
+   *
+   * `request.formData()` buffers and decodes a multipart body that may be
+   * megabytes of attacker-chosen bytes. Checking the budget after that means an
+   * abusive request still costs the full parse — CPU and memory spent on a
+   * request we had already decided to refuse, which hands the attacker the
+   * exhaustion they were reaching for while we congratulate ourselves on the
+   * 429. A refusal has to be cheaper than an acceptance or it is not a control.
+   *
+   * It also runs ahead of the misconfiguration check, which reads several
+   * bindings, for the same reason: the refused path should touch as little as
+   * possible. Neither order is unsafe — a misconfigured deploy answers 429 or
+   * 502 and neither is the healthy signature the post-deploy probe matches on —
+   * so the cheaper one wins.
+   *
+   * The CORS headers are attached, and that is not cosmetic. A 429 the browser
+   * withholds from the page is indistinguishable from a network failure, and
+   * this widget's response to an unreadable failure is the candidate submitting
+   * again: one refusal becomes duplicate leads plus a false failure report. The
+   * refusal has to be VISIBLE, never a silent drop.
+   */
+  if (!(await withinRateLimit(env.SUBMIT_LIMITER, rateLimitKey(request)))) {
+    return fail("RATE_LIMITED", { ...cors, ...RETRY_AFTER_HEADERS });
+  }
+
+  // Ahead of parsing, storage and network. A deploy that cannot deliver a
   // lead must never write a candidate's CV into R2 and must never answer the
   // post-deploy probe with the healthy signature.
   const misconfigured = misconfiguredBinding(env);
@@ -958,6 +1015,33 @@ async function route(
      * an unauthenticated caller cannot use the difference between "found" and
      * "not found" to probe which keys exist.
      */
+
+    /**
+     * THE RATE LIMIT SITS BETWEEN THE TWO, AND BOTH SIDES OF THAT ARE CHOSEN.
+     *
+     * AFTER THE HOST LOCK, because a wrong host must not spend anybody's
+     * budget. Reversed, a stranger hitting `*.workers.dev` — a name that is
+     * supposed to behave as though this route does not exist — could exhaust the
+     * limit belonging to a real office's address and lock actual staff out of
+     * actual CVs, all from a hostname that never should have answered anything
+     * but 404. It would also leak the route's existence: a 429 says something
+     * throttled, and therefore something worth finding, lives here.
+     *
+     * BEFORE THE CREDENTIAL, because the comparison is deliberately expensive.
+     * It hashes both operands and runs both halves unconditionally to close the
+     * timing and short-circuit channels — which means an attacker with unlimited
+     * attempts has unlimited samples to average away the noise those defences
+     * rely on. Capping the attempts is what makes that hardening hold. Refusing
+     * before the comparison also means a throttled probe learns nothing about
+     * whether its guess was close: it never reaches the comparison at all.
+     */
+    if (!(await withinRateLimit(env.RESUME_LIMITER, rateLimitKey(request)))) {
+      // No CORS (W6 holds at every status) and no `WWW-Authenticate`: a 429 is
+      // not a challenge, and prompting for a credential here would advertise
+      // exactly what refusing before the comparison is meant to keep quiet.
+      return fail("RATE_LIMITED", RETRY_AFTER_HEADERS);
+    }
+
     const grant = await authorizeResume(request, env);
     if (grant === null) return fail("UNAUTHORIZED", RESUME_CHALLENGE_HEADERS);
 
