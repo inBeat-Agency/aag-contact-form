@@ -28,10 +28,18 @@ export default defineWorkersConfig({
         wrangler: { configPath: "./worker/wrangler.toml" },
         miniflare: {
           // Test-only values. The real ones are Worker secrets and vars and are
-          // never committed. Every string here is deliberately fake, and the
+          // never committed. Every SECRET here is deliberately fake, and the
           // secret-hygiene test asserts none of them reaches a log line.
           bindings: {
-            ALLOWED_ORIGIN: "https://widget.test",
+            // ALLOWED_ORIGINS is public configuration, not a secret - it is
+            // literally emitted in a response header - so the two real AAG
+            // origins are used verbatim. The third entry is unrelated on
+            // purpose: it is what stops an implementation that hardcodes an AAG
+            // hostname, or matches the substring "alphaapexgroup", from passing.
+            // The padding after each comma is also deliberate; it exercises the
+            // defensive parse on every single test in the file.
+            ALLOWED_ORIGINS:
+              "https://www.alphaapexgroup.com, https://alpha-apex-group.webflow.io, https://widget.test",
             // Deliberately NOT the host the suite posts submissions to. The
             // /resume host lock is only observable when the two differ.
             RESUME_HOST: "resume-host.test",

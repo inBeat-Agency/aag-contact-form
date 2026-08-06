@@ -283,10 +283,30 @@ Ordered. Every intermediate state is safe; running these out of order is not.
    - **P2** — an unauthenticated `GET /resume/<sentinel-uuid>` must return a
      response containing `cloudflareaccess.com`. A `404` here means the gate is
      missing, not that the key is unknown.
-6. Confirm `ALLOWED_ORIGIN` **equals** `document.location.origin` read from the
-   live mounted page. A mismatch still delivers and stores the lead — multipart
-   fires no preflight — but blocks the response, so the user sees an error and
-   retries. That produces duplicate leads plus a false failure report.
+6. Confirm `ALLOWED_ORIGINS` **contains** `document.location.origin` read from
+   the live mounted page — on **every** origin the widget is mounted on, not
+   just the one you happen to be looking at. During the migration window that is
+   both of them: `alphaapexgroup.com` still serves Squarespace, so the widget
+   lives on the Webflow staging origin and on production simultaneously.
+
+   It is a comma-separated allowlist, and the Worker echoes back the caller's
+   own origin when it is on the list. An origin that is missing still gets its
+   lead delivered and its CV stored — multipart is CORS-safelisted, so no
+   preflight fires — but the response is withheld from the page, so the
+   candidate sees an error and submits again. That is duplicate leads plus a
+   false failure report, and with a one-entry list it is a certainty on cutover
+   day rather than a risk.
+
+   The value that must be set at deploy time:
+
+   ```
+   ALLOWED_ORIGINS = "https://www.alphaapexgroup.com,https://alpha-apex-group.webflow.io"
+   ```
+
+   Every `/submit` log line carries the received `Origin`, so a mismatch is one
+   query: group by `origin` and any name not on the list above is the
+   misconfiguration, named. Drop the staging entry only once the widget is no
+   longer mounted there.
 7. **Only now** repoint `data-endpoint` at `https://<submit-host>/submit` and
    send one real staging submission end to end.
 8. Delete the old Zapier Catch Hook and verify a direct POST to it now fails.

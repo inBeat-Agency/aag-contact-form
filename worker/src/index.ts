@@ -33,7 +33,8 @@ import {
 
 export interface Env {
   RESUMES: R2Bucket;
-  ALLOWED_ORIGIN: string;
+  /** Comma-separated allowlist. See {@link parseAllowedOrigins}. */
+  ALLOWED_ORIGINS: string;
   RESUME_HOST: string;
   RESUME_URL_BASE: string;
   ZAPIER_HOOK_URL: string;
@@ -65,14 +66,79 @@ const ERROR_STATUS: Record<ErrorCode, number> = {
 
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" };
 
-/** CORS headers for `/submit` responses. Never applied to any other path. */
-function corsHeaders(env: Env): Record<string, string> {
-  return {
-    "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN,
+/**
+ * Split the comma-separated allowlist into origins.
+ *
+ * Parsed defensively on purpose. This var is edited by hand - in a TOML file and
+ * in a dashboard field - so padding, a stray trailing comma and a wrapped line
+ * are all things a human will produce, and not one of them may silently drop an
+ * origin. A dropped origin IS the outage this list exists to prevent.
+ */
+function parseAllowedOrigins(raw: string | undefined): string[] {
+  return String(raw ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+}
+
+/**
+ * The origin to echo back to this caller, or null when there is nothing to echo.
+ *
+ * THE COMPARISON IS EXACT EQUALITY AND HAS TO STAY THAT WAY. `startsWith` would
+ * accept `https://www.alphaapexgroup.com.attacker.tld`; a substring test against
+ * the raw list would accept `https://www.alphaapexgroup.co`, a domain anyone can
+ * register. Either one hands our responses to somebody else's page.
+ *
+ * Returning null - rather than `*`, or the first entry, or any other fallback -
+ * is the entire point. `*` cannot be used with credentials and would give the
+ * response to any site on the internet; a fixed value silently breaks every
+ * origin except the one that happened to get hardcoded, which is precisely the
+ * failure this allowlist was introduced to fix.
+ *
+ * NO `Origin` HEADER AT ALL is treated the same as an unlisted one: nothing is
+ * echoed. Same-origin posts, curl, server-to-server callers and the P1 deploy
+ * probe all arrive this way. CORS is a browser mechanism that engages only when
+ * the browser sent an origin, so there is nothing to answer here - and answering
+ * nothing is the one option that cannot widen access, because there is no origin
+ * to widen it to.
+ */
+function matchAllowedOrigin(request: Request, env: Env): string | null {
+  const requestOrigin = request.headers.get("Origin");
+  if (requestOrigin === null || requestOrigin === "") return null;
+
+  return parseAllowedOrigins(env.ALLOWED_ORIGINS).some(
+    (allowed) => allowed === requestOrigin,
+  )
+    ? requestOrigin
+    : null;
+}
+
+/**
+ * CORS headers for `/submit` responses. Never applied to any other path.
+ *
+ * `Access-Control-Allow-Origin` appears ONLY when the caller's own origin is on
+ * the list, and then carries that caller's origin verbatim. An unlisted or
+ * absent origin gets the rest of the block and no echo — the request is still
+ * processed either way, because by the time it reaches us the multipart body has
+ * already been delivered and refusing it would cost a real lead rather than
+ * prevent anything.
+ *
+ * `Vary: Origin` is unconditional: the response now genuinely differs per
+ * caller, and without it a shared cache is free to hand one origin's echo to
+ * another.
+ */
+function corsHeaders(request: Request, env: Env): Record<string, string> {
+  const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "86400",
+    Vary: "Origin",
   };
+
+  const echo = matchAllowedOrigin(request, env);
+  if (echo !== null) headers["Access-Control-Allow-Origin"] = echo;
+
+  return headers;
 }
 
 /**
@@ -390,7 +456,7 @@ async function forwardToZapier(
  * endpoint is reachable unauthenticated AND answered by this Worker.
  */
 async function handleSubmit(request: Request, env: Env): Promise<Routed> {
-  const cors = corsHeaders(env);
+  const cors = corsHeaders(request, env);
 
   // FIRST, ahead of parsing, storage and network. A deploy that cannot deliver a
   // lead must never write a candidate's CV into R2 and must never answer the
@@ -615,7 +681,7 @@ async function route(
       return {
         response: new Response(null, {
           status: 204,
-          headers: corsHeaders(env),
+          headers: corsHeaders(request, env),
         }),
         errorCode: null,
       };
@@ -660,10 +726,13 @@ export default {
      * things that turn an observability line into a credential leak, and a
      * runtime test drives every error path asserting none of them appear.
      *
-     * `origin` is here on purpose: an ALLOWED_ORIGIN mismatch still delivers the
-     * lead but hides the response from the page, so the user retries and we get
-     * duplicates plus a false failure report. Without this field that
-     * misconfiguration is invisible.
+     * `origin` is here on purpose, and it is the RECEIVED value rather than a
+     * verdict. An origin missing from ALLOWED_ORIGINS still delivers the lead
+     * and stores the CV but hides the response from the page, so the candidate
+     * retries and we get duplicates plus a false failure report. Logging the
+     * value makes that one query — group `/submit` by `origin` and any name that
+     * is not on the allowlist is the misconfiguration, named. Without it the
+     * mismatch presents as a mysterious client-side error and nothing else.
      */
     console.log({
       requestId: crypto.randomUUID(),

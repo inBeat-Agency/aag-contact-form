@@ -40,11 +40,25 @@ binding = "RESUMES"
 bucket_name = "aag-resumes"
 
 [vars]
-# Origin allowed to read a /submit response. A mismatch still DELIVERS the lead
-# (multipart is CORS-safelisted, so no preflight fires) but hides the response
-# from the page, producing duplicate submissions and a false failure report.
-# Must be asserted against the live document origin at cutover.
-ALLOWED_ORIGIN = "https://alpha-apex-group.webflow.io"
+# Comma-separated ALLOWLIST of origins allowed to read a /submit response. The
+# Worker echoes back the caller's OWN origin when it appears here, and emits no
+# Access-Control-Allow-Origin at all when it does not - never `*`, which cannot
+# be used with credentials and would hand the response to any site, and never a
+# fixed value, which silently breaks every other legitimate origin.
+#
+# BOTH ENTRIES ARE REQUIRED DURING THE MIGRATION WINDOW. alphaapexgroup.com still
+# serves Squarespace, so the widget is mounted on the Webflow staging origin AND
+# on production as the cutover proceeds. A list that holds only one of them is
+# not a smaller risk, it is a guaranteed outage on the day the other goes live:
+# multipart is CORS-safelisted, so NO preflight fires, and a non-matching origin
+# still gets its lead delivered and its CV stored while the response is withheld
+# from the page. The candidate sees an error and submits again - duplicate leads
+# plus a false failure report, which is worse than a clean refusal.
+#
+# Order does not matter and whitespace is tolerated; empty entries are ignored.
+# `worker/wrangler.config.test.ts` asserts this line still names exactly these
+# two origins, because the runtime suite reads its own test binding and cannot.
+ALLOWED_ORIGINS = "https://www.alphaapexgroup.com,https://alpha-apex-group.webflow.io"
 
 # Base for the resume URL handed to Zapier. Set at deploy time to the resume
 # hostname. There is deliberately no source-level fallback: if this is missing

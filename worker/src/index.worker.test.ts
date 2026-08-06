@@ -38,7 +38,7 @@ import type { ZapierPayload } from "./payload";
 declare module "cloudflare:test" {
   interface ProvidedEnv {
     RESUMES: R2Bucket;
-    ALLOWED_ORIGIN: string;
+    ALLOWED_ORIGINS: string;
     RESUME_HOST: string;
     RESUME_URL_BASE: string;
     ZAPIER_HOOK_URL: string;
@@ -162,32 +162,406 @@ describe("POST /submit - bodyless request (deploy probe P1 contract)", () => {
   });
 });
 
+/**
+ * THE ORIGINS, TYPED OUT AS LITERALS - DELIBERATELY NOT READ FROM THE BINDING.
+ *
+ * A prior suite in this repo stayed 66/68 green while the constant it claimed to
+ * be testing was changed ten separate times, because every assertion built its
+ * expected value out of the very binding it was supposed to be verifying. That
+ * test proves the config equals itself and nothing more.
+ *
+ * So these are written out by hand. `worker/wrangler.config.test.ts` separately
+ * asserts the deploy config still declares exactly these two, which is what lets
+ * the runtime behaviour proved here and the value actually shipped drift apart
+ * loudly instead of silently.
+ */
+const AAG_PRODUCTION_ORIGIN = "https://www.alphaapexgroup.com";
+const AAG_STAGING_ORIGIN = "https://alpha-apex-group.webflow.io";
+
+/**
+ * A third listed origin with nothing to do with AAG.
+ *
+ * It is here so an implementation that hardcodes an AAG hostname - or matches on
+ * the substring "alphaapexgroup" - cannot pass this file. The allowlist has to
+ * be a list the code READS, never a name the code KNOWS.
+ */
+const UNRELATED_ALLOWED_ORIGIN = "https://widget.test";
+
+type ProbedSubmit = {
+  status: number;
+  headerNames: string[];
+  header: (name: string) => string | null;
+  body: string;
+};
+
+async function probeSubmit(init: RequestInit = {}): Promise<ProbedSubmit> {
+  const response = await SELF.fetch(`${ORIGIN}/submit`, init);
+  const body = await response.text();
+  return {
+    status: response.status,
+    headerNames: [...response.headers.keys()]
+      .map((name) => name.toLowerCase())
+      .sort(),
+    header: (name: string) => response.headers.get(name),
+    body,
+  };
+}
+
+/**
+ * THE COMPLETE HEADER SETS, ASSERTED AS SETS.
+ *
+ * Member-by-member assertions are why a prior metadata guard in this same file
+ * stayed green while raw candidate email was being written to every stored
+ * object: checking that the things you expect ARE present says nothing whatever
+ * about what else is. An `Access-Control-Allow-Origin` that appears when no
+ * origin matched is exactly that kind of extra, and only an exact set catches
+ * it.
+ *
+ * `Vary: Origin` is present on every one of them because the response now
+ * genuinely differs per caller; without it a shared cache is free to hand one
+ * origin's echo to another.
+ */
+const PREFLIGHT_HEADERS_WITH_ECHO = [
+  "access-control-allow-headers",
+  "access-control-allow-methods",
+  "access-control-allow-origin",
+  "access-control-max-age",
+  "vary",
+];
+
+const PREFLIGHT_HEADERS_WITHOUT_ECHO = [
+  "access-control-allow-headers",
+  "access-control-allow-methods",
+  "access-control-max-age",
+  "vary",
+];
+
+const SUBMIT_HEADERS_WITH_ECHO = [
+  "access-control-allow-headers",
+  "access-control-allow-methods",
+  "access-control-allow-origin",
+  "access-control-max-age",
+  "content-type",
+  "vary",
+];
+
+const SUBMIT_HEADERS_WITHOUT_ECHO = [
+  "access-control-allow-headers",
+  "access-control-allow-methods",
+  "access-control-max-age",
+  "content-type",
+  "vary",
+];
+
+describe("CORS: an allowlist that echoes the caller's own origin", () => {
+  /**
+   * W2, and the reason this change exists.
+   *
+   * During the AAG migration window the widget is mounted on BOTH the future
+   * production origin and the staging one, because production still serves
+   * Squarespace. A single allowed origin means every submission from the other
+   * one hits the worst failure this project has: multipart is CORS-safelisted,
+   * so NO preflight fires, the POST is delivered, the CV is written to R2 and
+   * the lead reaches Zapier - and only the RESPONSE is withheld from the page.
+   * The candidate sees an error and submits again. Duplicate leads plus a false
+   * failure report, and on cutover day it is a certainty rather than a risk.
+   */
+  const ALLOWED = [
+    ["the production origin", AAG_PRODUCTION_ORIGIN],
+    ["the staging origin", AAG_STAGING_ORIGIN],
+    ["an unrelated listed origin", UNRELATED_ALLOWED_ORIGIN],
+  ] as const;
+
+  it.each(ALLOWED)(
+    "echoes %s back to itself on POST /submit",
+    async (_label, origin) => {
+      const probe = await probeSubmit({
+        method: "POST",
+        headers: { Origin: origin },
+      });
+
+      expect(probe.header("Access-Control-Allow-Origin")).toBe(origin);
+    },
+  );
+
+  it.each(ALLOWED)(
+    "echoes %s back to itself on the OPTIONS /submit preflight",
+    async (_label, origin) => {
+      const probe = await probeSubmit({
+        method: "OPTIONS",
+        headers: { Origin: origin },
+      });
+
+      expect(probe.status).toBe(204);
+      expect(probe.header("Access-Control-Allow-Origin")).toBe(origin);
+    },
+  );
+
+  /**
+   * THE WILDCARD AND THE STATIC-VALUE MUTATIONS, CAUGHT IN ONE ASSERTION.
+   *
+   * `*` cannot be used with credentials and would hand the response to any site
+   * on the internet. A static value - including "fall back to the first entry
+   * when nothing matched" - silently breaks every other legitimate origin, which
+   * is the very outage being fixed here.
+   *
+   * Collecting all three answers and comparing them as an ORDERED LIST is what
+   * makes both mutations red: either one collapses three distinct values into a
+   * single repeated one.
+   */
+  it("gives each listed origin a different answer, never a wildcard and never one fixed value", async () => {
+    const echoed: (string | null)[] = [];
+    for (const [, origin] of ALLOWED) {
+      const probe = await probeSubmit({
+        method: "POST",
+        headers: { Origin: origin },
+      });
+      echoed.push(probe.header("Access-Control-Allow-Origin"));
+    }
+
+    expect(echoed).toEqual([
+      AAG_PRODUCTION_ORIGIN,
+      AAG_STAGING_ORIGIN,
+      UNRELATED_ALLOWED_ORIGIN,
+    ]);
+  });
+
+  it("pins the complete header set of an allowed preflight", async () => {
+    const probe = await probeSubmit({
+      method: "OPTIONS",
+      headers: { Origin: AAG_STAGING_ORIGIN },
+    });
+
+    expect(probe.status).toBe(204);
+    expect(probe.headerNames).toEqual(PREFLIGHT_HEADERS_WITH_ECHO);
+  });
+
+  it("pins the complete header set of an allowed POST", async () => {
+    const probe = await probeSubmit({
+      method: "POST",
+      headers: { Origin: AAG_PRODUCTION_ORIGIN },
+    });
+
+    expect(probe.headerNames).toEqual(SUBMIT_HEADERS_WITH_ECHO);
+  });
+
+  /**
+   * The echo must follow the BINDING, not a hostname typed into the source. If
+   * it did not, the two tests above would stay green while the next origin
+   * change became a code deploy - which is exactly the property this whole
+   * design exists to avoid.
+   */
+  it("echoes whatever the binding lists, not a hostname in source", async () => {
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "OPTIONS",
+        headers: { Origin: "https://late-addition.test" },
+      }),
+      { ...env, ALLOWED_ORIGINS: "https://late-addition.test" },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe(
+      "https://late-addition.test",
+    );
+  });
+});
+
+describe("CORS: an origin that is not on the list is never echoed", () => {
+  /**
+   * SUBSTRING MATCHING IS A VULNERABILITY, AND THIS TABLE IS THE PROOF WE DID
+   * NOT WRITE ONE.
+   *
+   * Each row breaks a different sloppy comparison. The suffix-extended and
+   * sibling-subdomain rows kill `startsWith` and `origin.includes(entry)`; the
+   * truncated row kills `rawList.includes(origin)` and `entry.includes(origin)`,
+   * because "https://www.alphaapexgroup.co" IS a substring of the configured
+   * list and someone can register that domain. Only exact equality survives all
+   * of them.
+   */
+  const NEAR_MISSES = [
+    ["a scheme downgrade", "http://www.alphaapexgroup.com"],
+    ["a trailing slash", "https://www.alphaapexgroup.com/"],
+    [
+      "a suffix-extended lookalike",
+      "https://www.alphaapexgroup.com.attacker.tld",
+    ],
+    ["a truncated lookalike", "https://www.alphaapexgroup.co"],
+    ["a sibling subdomain", "https://evil.alphaapexgroup.com"],
+    ["the bare apex without www", "https://alphaapexgroup.com"],
+    ["an explicit port", "https://www.alphaapexgroup.com:8443"],
+    [
+      "a suffix-extended staging lookalike",
+      "https://alpha-apex-group.webflow.io.evil.tld",
+    ],
+    ["a prefixed staging lookalike", "https://not-alpha-apex-group.webflow.io"],
+    ["an opaque origin", "null"],
+    ["an entirely unrelated site", "https://attacker.example"],
+  ] as const;
+
+  it.each(NEAR_MISSES)(
+    "refuses to echo %s, emitting no Access-Control-Allow-Origin at all",
+    async (_label, origin) => {
+      const probe = await probeSubmit({
+        method: "POST",
+        headers: { Origin: origin },
+      });
+
+      expect(probe.headerNames).toEqual(SUBMIT_HEADERS_WITHOUT_ECHO);
+    },
+  );
+
+  it.each(NEAR_MISSES)(
+    "refuses to echo %s on the preflight either",
+    async (_label, origin) => {
+      const probe = await probeSubmit({
+        method: "OPTIONS",
+        headers: { Origin: origin },
+      });
+
+      expect(probe.status).toBe(204);
+      expect(probe.headerNames).toEqual(PREFLIGHT_HEADERS_WITHOUT_ECHO);
+    },
+  );
+
+  /**
+   * REFUSING THE REQUEST WOULD BE WORSE THAN WITHHOLDING THE HEADER.
+   *
+   * By the time the Worker sees this the multipart body has already crossed the
+   * wire - no preflight ever fired - so the candidate has already submitted. A
+   * misconfigured allowlist must cost us the acknowledgement, never the lead.
+   * This asserts the whole pipeline still ran: 200, our own `ok:true`, and a
+   * real resume URL.
+   */
+  it("still stores and forwards a valid submission that arrived from an unlisted origin", async () => {
+    const captured = interceptZapier();
+
+    const response = await postForm(resumeSubmission(), {
+      Origin: "https://attacker.example",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(captured.body).toBeTypeOf("string");
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+});
+
+describe("CORS: a request with no Origin header at all", () => {
+  /**
+   * DOCUMENTED BEHAVIOUR: no `Access-Control-Allow-Origin` is emitted, and the
+   * request is processed exactly as it would have been anyway.
+   *
+   * Same-origin form posts, curl, server-to-server callers and the P1 deploy
+   * probe all arrive with no Origin. CORS is a browser mechanism that engages
+   * only when the browser sent one, so there is nothing to answer - and
+   * answering nothing is the single option that cannot widen access, since
+   * there is no origin to widen it to.
+   */
+  it("emits no Access-Control-Allow-Origin", async () => {
+    const probe = await probeSubmit({ method: "POST" });
+
+    expect(probe.headerNames).toEqual(SUBMIT_HEADERS_WITHOUT_ECHO);
+  });
+
+  it("emits no Access-Control-Allow-Origin on the preflight", async () => {
+    const probe = await probeSubmit({ method: "OPTIONS" });
+
+    expect(probe.status).toBe(204);
+    expect(probe.headerNames).toEqual(PREFLIGHT_HEADERS_WITHOUT_ECHO);
+  });
+
+  /**
+   * The P1 deploy probe sends exactly this request and matches on exactly this
+   * body. Withholding a CORS header must not disturb it.
+   */
+  it("still answers the P1 probe signature", async () => {
+    const probe = await probeSubmit({ method: "POST" });
+
+    expect(probe.status).toBe(400);
+    expect(probe.body).toBe('{"ok":false,"error":"INVALID_SUBMISSION"}');
+  });
+});
+
+describe("CORS: the allowlist string is parsed defensively", () => {
+  async function preflightWith(allowList: string, requestOrigin: string) {
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/submit`, {
+        method: "OPTIONS",
+        headers: { Origin: requestOrigin },
+      }),
+      { ...env, ALLOWED_ORIGINS: allowList },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    return {
+      allowOrigin: response.headers.get("Access-Control-Allow-Origin"),
+      headerNames: [...response.headers.keys()]
+        .map((name) => name.toLowerCase())
+        .sort(),
+    };
+  }
+
+  /**
+   * A comma-separated var is edited by hand at deploy time, in a TOML file and
+   * in a dashboard field. Padding, a stray trailing comma and a wrapped line are
+   * all things a human will produce, and none of them should silently drop an
+   * origin - a dropped origin is the outage.
+   */
+  it.each([
+    ["surrounding whitespace", "  https://a.test  ,  https://b.test  "],
+    ["empty entries and a trailing comma", "https://a.test,,,https://b.test,"],
+    ["newlines and tabs", "\n\thttps://a.test ,\n\thttps://b.test\n"],
+  ])("matches both entries when the list carries %s", async (_label, list) => {
+    await expect(preflightWith(list, "https://a.test")).resolves.toMatchObject({
+      allowOrigin: "https://a.test",
+    });
+    await expect(preflightWith(list, "https://b.test")).resolves.toMatchObject({
+      allowOrigin: "https://b.test",
+    });
+  });
+
+  it("matches a single-entry list that has no comma at all", async () => {
+    await expect(
+      preflightWith("https://only.test", "https://only.test"),
+    ).resolves.toMatchObject({ allowOrigin: "https://only.test" });
+  });
+
+  /**
+   * Fail closed on the HEADER, never on the request. An unusable allowlist is an
+   * unconfigured deploy and must not hand the response to anybody, but the
+   * submission itself still has to go through: see the unlisted-origin test
+   * above for why losing the lead is the worse outcome.
+   */
+  it.each([
+    ["unset", ""],
+    ["whitespace only", "   \n\t  "],
+    ["commas only", ",,,"],
+  ])("echoes nothing when the allowlist is %s", async (_label, list) => {
+    await expect(
+      preflightWith(list, AAG_PRODUCTION_ORIGIN),
+    ).resolves.toMatchObject({ headerNames: PREFLIGHT_HEADERS_WITHOUT_ECHO });
+  });
+});
+
 describe("CORS is scoped to /submit only", () => {
-  it("answers OPTIONS /submit with 204 and the configured allowed origin", async () => {
-    const response = await SELF.fetch(`${ORIGIN}/submit`, { method: "OPTIONS" });
-
-    expect(response.status).toBe(204);
-    expect(response.headers.get("Access-Control-Allow-Origin")).toBe(
-      env.ALLOWED_ORIGIN,
-    );
-  });
-
-  it("puts the allowed origin on a POST /submit response too", async () => {
-    const response = await SELF.fetch(`${ORIGIN}/submit`, { method: "POST" });
-
-    expect(response.headers.get("Access-Control-Allow-Origin")).toBe(
-      env.ALLOWED_ORIGIN,
-    );
-  });
-
   /**
    * W6. `/resume` streams candidate CVs on the origin whose session IS the
    * Access identity. Making that stream cross-origin readable would hand any
    * page the ability to read PII with the staff member's own session.
+   *
+   * The listed origin is used on purpose: a `/resume` handler that reused the
+   * `/submit` CORS helper would echo it, and this has to be the test that
+   * notices.
    */
-  it("emits no Access-Control-Allow-Origin on a non-/submit path", async () => {
+  it("emits no Access-Control-Allow-Origin on a non-/submit path, even from a listed origin", async () => {
     const response = await SELF.fetch(
       `${ORIGIN}/resume/11111111-2222-4333-8444-555555555555`,
+      { headers: { Origin: AAG_PRODUCTION_ORIGIN } },
     );
 
     expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();

@@ -34,15 +34,25 @@ function installedRuntimeCompatibilityDate(): string {
   return `${stamp!.slice(0, 4)}-${stamp!.slice(4, 6)}-${stamp!.slice(6, 8)}`;
 }
 
+function deployConfig(): string {
+  return readFileSync(join(process.cwd(), "worker", "wrangler.toml"), "utf8");
+}
+
 function configuredCompatibilityDate(): string {
-  const toml = readFileSync(
-    join(process.cwd(), "worker", "wrangler.toml"),
-    "utf8",
-  );
-  const match = /^compatibility_date\s*=\s*"([\d-]+)"/m.exec(toml);
+  const match = /^compatibility_date\s*=\s*"([\d-]+)"/m.exec(deployConfig());
 
   expect(match).not.toBeNull();
   return match![1]!;
+}
+
+function configuredAllowedOrigins(): string[] {
+  const match = /^ALLOWED_ORIGINS\s*=\s*"([^"]*)"/m.exec(deployConfig());
+
+  expect(match).not.toBeNull();
+  return match![1]!
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
 }
 
 describe("worker compatibility date", () => {
@@ -65,5 +75,37 @@ describe("worker compatibility date", () => {
         `installed workerd only supports up to "${supported}", so every worker ` +
         `test runs against different semantics than the deploy asks for.`,
     ).toBe(true);
+  });
+});
+
+/**
+ * THE VALUE THAT ACTUALLY SHIPS, WRITTEN OUT BY HAND.
+ *
+ * The runtime suite proves the MECHANISM - a listed origin is echoed, an
+ * unlisted one is not - but it reads its own test binding, so it structurally
+ * cannot notice `wrangler.toml` losing an origin. That drift is the outage:
+ * multipart is CORS-safelisted, so a dropped origin still delivers the lead and
+ * stores the CV while hiding the response, and the candidate resubmits.
+ *
+ * These two literals are therefore not imported, not parsed out of anything, and
+ * not shared with the runtime suite. They are the deployment promise, typed
+ * again, and this is the only test that can see the two drift apart.
+ */
+describe("worker allowed origins", () => {
+  const AAG_PRODUCTION_ORIGIN = "https://www.alphaapexgroup.com";
+  const AAG_STAGING_ORIGIN = "https://alpha-apex-group.webflow.io";
+
+  /**
+   * Asserted as a complete ordered list rather than "contains". During the
+   * migration window the widget is mounted on BOTH names - production still
+   * serves Squarespace - so either one going missing takes half the submissions
+   * down, and an extra one nobody noticed is an origin allowed to read our
+   * responses.
+   */
+  it("declares an allowlist covering production AND staging, and nothing else", () => {
+    expect(configuredAllowedOrigins()).toEqual([
+      AAG_PRODUCTION_ORIGIN,
+      AAG_STAGING_ORIGIN,
+    ]);
   });
 });
