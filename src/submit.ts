@@ -1,23 +1,19 @@
 import type { ContactFormFields } from "./schema";
-// Cross-boundary import, and deliberately so. `toZapierPayload` belongs to the
-// Cloudflare Worker; it lives under `worker/` because that is where it will run.
-// The widget borrows it only while the Worker is paused — see TEMPORARY below.
-import { toZapierPayload } from "../worker/src/payload";
 
 /** Upload-safe wall-clock default for the submission request. */
 export const SUBMIT_TIMEOUT_MS = 60_000;
 
-export type SubmitOutcome = "success" | "error";
-
-export type SubmitOptions = {
-  /**
-   * ISO-8601 submission timestamp. Injected rather than read from the clock
-   * inside the transform so tests stay deterministic. Defaults to now.
-   */
-  submittedAt?: string;
-  /** Abort deadline for the request. Defaults to {@link SUBMIT_TIMEOUT_MS}. */
-  timeoutMs?: number;
-};
+/**
+ * The outcome of a submission.
+ *
+ * `success` is a claim the WORKER made about itself, never an inference the
+ * widget drew from a status line — see {@link submitContactForm}. `resumeUrl`
+ * is whatever the Worker stored the file under, or `""` for an inquiry that
+ * carried no resume.
+ */
+export type SubmitResult =
+  | { outcome: "success"; resumeUrl: string }
+  | { outcome: "error" };
 
 /**
  * Build the multipart payload sent to the backend. Fields are flat camelCase
@@ -58,100 +54,83 @@ export function buildFormData(
 }
 
 /* ===========================================================================
- * TEMPORARY — the widget talks to the Zapier Catch Hook directly.
+ * TRANSPORT — multipart, straight to the Cloudflare Worker.
  * ===========================================================================
  *
- * DO NOT "clean this up" into JSON. Read this first; every alternative below
- * has already been tried and is broken for a specific, verified reason.
+ * The widget posts the `FormData` from `buildFormData()` unchanged. The Worker
+ * parses the multipart body, uploads the resume to object storage, and forwards
+ * the flat 15-key JSON that `worker/src/payload.ts` produces. That transform is
+ * SERVER-SIDE and must stay there: it is the only place that knows the stored
+ * resume URL, and posting a flat body from the browser is what drops the file.
  *
- *   1. `multipart/form-data` (what this widget used to send) — Zapier does not
- *      accept it. It only accepts XML, JSON or URL-encoded bodies. Multipart is
- *      SILENTLY DISCARDED **and Zapier still answers HTTP 200 with
- *      {"status":"success"}**. So the widget shows the success panel, the team
- *      believes delivery works, and every single lead is dropped. A green
- *      response here is not evidence of anything.
+ * DO NOT post directly to Zapier from here. That was tried:
  *
- *   2. `application/json` — impossible from a browser. That content type is not
- *      CORS-safelisted, so the browser fires a preflight `OPTIONS` request first
- *      and Zapier never answers it. The request dies before Zapier sees a byte.
- *      Zapier's own docs say: "do not set a custom Content-Type header."
- *
- *   3. `application/x-www-form-urlencoded` — the ONLY option left. It is on
- *      Zapier's accepted list AND it is CORS-safelisted, so there is no
- *      preflight. That intersection is exactly one content type wide.
+ *   1. `multipart/form-data` to Zapier — silently DISCARDED, and Zapier still
+ *      answers HTTP 200 with {"status":"success"}. Every lead dropped while the
+ *      widget shows the success panel.
+ *   2. `application/json` from a browser — not CORS-safelisted, so the browser
+ *      preflights and Zapier never answers the OPTIONS.
+ *   3. `application/x-www-form-urlencoded` — the interim transport. It works,
+ *      but a URL-encoded body cannot carry a binary, so the resume was never
+ *      delivered at all. That is what this Worker exists to fix.
  *
  * THE SINGLE MOST BREAKABLE THING HERE: we never set a `Content-Type` header.
- * Passing a `URLSearchParams` body makes the browser set
- * `application/x-www-form-urlencoded;charset=UTF-8` on its own. Setting it by
- * hand — even to that same value — turns the request into a preflighted one and
- * breaks CORS against Zapier. `src/submit.test.ts` guards this explicitly.
- *
- * RESUME FILES ARE NOT DELIVERED. A URL-encoded body cannot carry a binary, and
- * there is nowhere to upload it to yet. We send the real `resumeFileName` and
- * leave `resumeUrl` empty on purpose: that pair is an honest, greppable signal
- * in Zapier meaning "a resume submission arrived, the file is still pending".
- * We do not fabricate a URL that resolves to nothing.
- *
- * INTERIM UNTIL THE WORKER EXISTS. The target architecture is
- * widget --multipart--> Cloudflare Worker --JSON--> Zapier, with the Worker
- * uploading the resume to object storage. That Worker is paused. When it lands,
- * the `worker/src/payload` import above disappears and this goes back to posting
- * `formData` untouched.
+ * The browser derives `multipart/form-data; boundary=…` from the `FormData`
+ * body, and only the browser knows that boundary. Setting the header by hand
+ * strips it, and the Worker then cannot parse a single field. Multipart is also
+ * CORS-safelisted, so leaving it alone means no preflight `OPTIONS` ever fires
+ * against the Worker. `src/submit.test.ts` guards this explicitly.
  * =========================================================================== */
 
 /**
- * Convert the widget's multipart body into the URL-encoded body Zapier accepts.
+ * POST the multipart payload to the endpoint with an AbortController-based
+ * timeout. Never throws.
  *
- * `buildFormData()` stays the input format: it is the widget's contract with the
- * Worker, and `worker/src/payload.test.ts` drives the transform from it.
- */
-function toZapierBody(formData: FormData, submittedAt: string): URLSearchParams {
-  const resume = formData.get("resume");
-
-  const payload = toZapierPayload(formData, {
-    // The browser knows the file name; nothing has uploaded the bytes.
-    resumeFileName: resume instanceof File ? resume.name : "",
-    resumeUrl: "",
-    submittedAt,
-  });
-
-  // URLSearchParams over a flat all-strings record. The transform already
-  // guarantees the resume binary is not in `payload`.
-  return new URLSearchParams(payload);
-}
-
-/**
- * POST the payload to the endpoint with an AbortController-based timeout.
- * Returns "success" on a 2xx response, "error" otherwise (including network
- * failures and timeouts). Never throws.
- *
- * Caveat inherited from the transport above: a 2xx from Zapier proves the
- * request was accepted, NOT that the lead was recorded.
+ * A 2xx proves a response ARRIVED. It does not prove our Worker produced it, and
+ * it does not prove the lead was recorded — an intercepting proxy, a parked
+ * domain, a stale Zapier hook and a captive portal all answer 200 with an HTML
+ * body. So success additionally requires the Worker to say so in a JSON body
+ * carrying `ok: true`. Anything else — non-JSON, a non-object, a missing `ok`,
+ * a falsy `ok` — is an error. There is no tolerant parsing and no defaulting.
  */
 export async function submitContactForm(
   endpoint: string,
   formData: FormData,
-  options: SubmitOptions = {},
-): Promise<SubmitOutcome> {
-  const {
-    submittedAt = new Date().toISOString(),
-    timeoutMs = SUBMIT_TIMEOUT_MS,
-  } = options;
-
+  timeoutMs = SUBMIT_TIMEOUT_MS,
+): Promise<SubmitResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(endpoint, {
       method: "POST",
-      // No `headers` key. See TEMPORARY above — setting Content-Type here is
-      // what breaks CORS against Zapier.
-      body: toZapierBody(formData, submittedAt),
+      // No `headers` key. See TRANSPORT above — setting Content-Type here strips
+      // the multipart boundary and the Worker parses nothing.
+      body: formData,
       signal: controller.signal,
     });
-    return response.ok ? "success" : "error";
+
+    if (!response.ok) return { outcome: "error" };
+
+    let parsed: unknown;
+    try {
+      parsed = await response.json();
+    } catch {
+      return { outcome: "error" };
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      return { outcome: "error" };
+    }
+
+    const body = parsed as { ok?: unknown; resumeUrl?: unknown };
+    if (body.ok !== true) return { outcome: "error" };
+
+    return {
+      outcome: "success",
+      resumeUrl: typeof body.resumeUrl === "string" ? body.resumeUrl : "",
+    };
   } catch {
-    return "error";
+    return { outcome: "error" };
   } finally {
     clearTimeout(timer);
   }

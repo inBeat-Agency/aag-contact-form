@@ -7,9 +7,21 @@ import { ContactForm } from "./ContactForm";
 // so no real request leaves the test and we can assert whether it was called.
 const fetchMock = vi.fn();
 
+/**
+ * A Worker-shaped success. A bare 200 is deliberately NOT used as the default:
+ * the widget treats a 2xx with no `ok: true` as an error, so a bare 200 here
+ * would silently exercise the failure path in every test that submits.
+ */
+function workerSuccess(resumeUrl = ""): Response {
+  return new Response(JSON.stringify({ ok: true, resumeUrl }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 beforeEach(() => {
   fetchMock.mockReset();
-  fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+  fetchMock.mockResolvedValue(workerSuccess());
   vi.stubGlobal("fetch", fetchMock);
 });
 
@@ -362,17 +374,14 @@ describe("ContactForm — Submit Resume submission", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    // Interim transport: URL-encoded to Zapier, never multipart. See src/submit.ts.
-    expect(init.body).toBeInstanceOf(URLSearchParams);
+    expect(init.body).toBeInstanceOf(FormData);
     expect(init.headers).toBeUndefined();
 
-    const body = init.body as URLSearchParams;
+    const body = init.body as FormData;
     expect(body.get("inquiryType")).toBe("Submit Resume");
     expect(body.get("firstName")).toBe("Jane");
-    // The file itself cannot travel URL-encoded; only its name does.
-    expect(body.get("resumeFileName")).toBe("jane-smith.pdf");
-    expect(body.get("resumeUrl")).toBe("");
-    expect(body.has("resume")).toBe(false);
+    expect(body.get("resume")).toBeInstanceOf(File);
+    expect((body.get("resume") as File).name).toBe("jane-smith.pdf");
   });
 
   it("never sends company details, even when they were typed under a previous inquiry type", async () => {
@@ -405,15 +414,59 @@ describe("ContactForm — Submit Resume submission", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    const body = init.body as URLSearchParams;
+    const body = init.body as FormData;
 
     expect(body.get("inquiryType")).toBe("Submit Resume");
-    // The Zapier contract always carries all 15 keys, so "not sent" means the
-    // key is present and EMPTY — not absent. What matters is that the values
-    // typed under the previous inquiry type did not leak.
-    expect(body.get("title")).toBe("");
-    expect(body.get("company")).toBe("");
-    expect(body.get("companySize")).toBe("");
+    // Multipart omits empty optionals outright. The Worker fills the missing
+    // contract keys in when it builds the flat Zapier payload.
+    expect(body.has("title")).toBe(false);
+    expect(body.has("company")).toBe(false);
+    expect(body.has("companySize")).toBe(false);
+  });
+});
+
+describe("ContactForm — which response renders the success panel", () => {
+  /** Fill a General Question to the point where submitting fires a real fetch. */
+  async function fillMinimalInquiry() {
+    renderForm();
+    const user = await selectInquiry("General Question");
+    await user.type(screen.getByLabelText("First Name"), "Jane");
+    await user.type(screen.getByLabelText("Last Name"), "Smith");
+    await user.type(screen.getByLabelText("Work Email"), "jane@company.com");
+    await user.type(
+      screen.getByLabelText("How can we help you?"),
+      "Please reach out.",
+    );
+    return user;
+  }
+
+  it("renders the success panel when the Worker answers ok:true", async () => {
+    fetchMock.mockResolvedValue(workerSuccess());
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("status")).toHaveTextContent("Thanks!");
+  });
+
+  it("renders the error panel when a 2xx carries an HTML body", async () => {
+    // The exact shape an intercepting proxy, a parked domain or a captive
+    // portal returns. The old `response.ok` contract called this a success.
+    fetchMock.mockResolvedValue(
+      new Response("<!doctype html><h1>Success</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    );
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Something went wrong/i,
+    );
   });
 });
 
