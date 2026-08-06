@@ -1,0 +1,38 @@
+name: Test
+
+# deploy.yml runs the suite only on push to main — that is AFTER merge, so a
+# red pull request can be merged and only breaks the build once it is already
+# on main. This workflow moves the suite in front of the merge.
+#
+# Deliberately NOT filtered with `branches: [main]`. Stacked pull requests
+# target the previous slice's branch rather than main, and a branch filter
+# would leave every stacked PR ungated — reintroducing the exact hole this
+# workflow exists to close.
+on:
+  pull_request:
+
+# The suite runs untrusted pull request code. Give it nothing it does not need.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Branch protection on `main` requires status checks by job name.
+    # The string to require is: test
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite
+        run: npm test
