@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -57,6 +57,7 @@ const RESUME_ACCEPT = ALLOWED_RESUME_EXTENSIONS.join(",");
 
 export function ContactForm({ endpoint, source }: ContactFormProps) {
   const [status, setStatus] = useState<Status>("idle");
+  const successRef = useRef<HTMLDivElement>(null);
 
   const {
     register,
@@ -114,6 +115,29 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
     void handleSubmit(onSubmit)(event);
   }
 
+  // Success replaces the entire form, collapsing the page by hundreds of
+  // pixels, so the short success panel can end up above the viewport: the
+  // visitor sees nothing and re-submits. Pull the panel into view as soon as it
+  // mounts. Declared before the early return below so the hook order stays
+  // stable across renders.
+  useEffect(() => {
+    if (status !== "success") return;
+
+    const node = successRef.current;
+    // The widget runs embedded in a third-party page, so neither API is
+    // guaranteed. Scrolling is a courtesy: a submission that already succeeded
+    // must never fail because the host environment lacks `scrollIntoView` or
+    // `matchMedia`.
+    if (!node || typeof node.scrollIntoView !== "function") return;
+
+    const reduceMotion =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    node.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "center",
+    });
+  }, [status]);
+
   if (status === "success") {
     return (
       <div className="aag-form-root form_component w-form">
@@ -123,7 +147,11 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
           they ship `display: none` and are toggled by Webflow's own form JS,
           which this widget does not load. React controls visibility here.
         */}
-        <div className="aag-form-success form_message-success" role="status">
+        <div
+          ref={successRef}
+          className="aag-form-success form_message-success"
+          role="status"
+        >
           <p className="aag-form-success-title">Thanks!</p>
           <p className="aag-form-success-text">
             We&rsquo;ll get back to you within one business day.
