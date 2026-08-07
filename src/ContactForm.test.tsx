@@ -44,6 +44,20 @@ async function selectInquiry(label: string) {
   return user;
 }
 
+/** Fill a General Question to the point where submitting fires a real fetch. */
+async function fillMinimalInquiry() {
+  renderForm();
+  const user = await selectInquiry("General Question");
+  await user.type(screen.getByLabelText("First Name"), "Jane");
+  await user.type(screen.getByLabelText("Last Name"), "Smith");
+  await user.type(screen.getByLabelText("Work Email"), "jane@company.com");
+  await user.type(
+    screen.getByLabelText("How can we help you?"),
+    "Please reach out.",
+  );
+  return user;
+}
+
 describe("ContactForm — initial render (placeholder preview)", () => {
   it("shows the inquiry select without a widget-owned header", () => {
     renderForm();
@@ -426,20 +440,6 @@ describe("ContactForm — Submit Resume submission", () => {
 });
 
 describe("ContactForm — which response renders the success panel", () => {
-  /** Fill a General Question to the point where submitting fires a real fetch. */
-  async function fillMinimalInquiry() {
-    renderForm();
-    const user = await selectInquiry("General Question");
-    await user.type(screen.getByLabelText("First Name"), "Jane");
-    await user.type(screen.getByLabelText("Last Name"), "Smith");
-    await user.type(screen.getByLabelText("Work Email"), "jane@company.com");
-    await user.type(
-      screen.getByLabelText("How can we help you?"),
-      "Please reach out.",
-    );
-    return user;
-  }
-
   it("renders the success panel when the Worker answers ok:true", async () => {
     fetchMock.mockResolvedValue(workerSuccess());
     const user = await fillMinimalInquiry();
@@ -467,6 +467,139 @@ describe("ContactForm — which response renders the success panel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /Something went wrong/i,
     );
+  });
+});
+
+describe("ContactForm — success panel scroll", () => {
+  /**
+   * jsdom implements neither `Element.prototype.scrollIntoView` nor
+   * `window.matchMedia`. `scrollIntoView` is a prototype method rather than a
+   * global, so `vi.stubGlobal` cannot reach it — it is assigned outright here
+   * and deleted again after every test in this block.
+   */
+  function stubScrollIntoView() {
+    const scrollIntoView = vi.fn();
+    (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView =
+      scrollIntoView;
+    return scrollIntoView;
+  }
+
+  /**
+   * The component reads only `matches` off the query list, so a minimal shape
+   * is enough. `vi.unstubAllGlobals` in the file-level teardown removes it.
+   */
+  function stubReducedMotion(matches: boolean) {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({ matches, media: query })),
+    );
+  }
+
+  afterEach(() => {
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it("scrolls the success panel into view on a successful submission", async () => {
+    const scrollIntoView = stubScrollIntoView();
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    const status = await screen.findByRole("status");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+    // Centring is what rescues the panel. Success replaces the whole form, so
+    // the page collapses and aligning to the top can still leave the message
+    // above the viewport. No `matchMedia` is stubbed here, matching a host
+    // page that does not implement it: the animated default still applies.
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      behavior: "smooth",
+      block: "center",
+    });
+
+    // It must be the success panel that moves, not some other node.
+    expect(scrollIntoView.mock.contexts[0]).toBe(status);
+  });
+
+  it("scrolls without animation when the visitor prefers reduced motion", async () => {
+    stubReducedMotion(true);
+    const scrollIntoView = stubScrollIntoView();
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      behavior: "auto",
+      block: "center",
+    });
+  });
+
+  it("animates the scroll when motion is not reduced", async () => {
+    stubReducedMotion(false);
+    const scrollIntoView = stubScrollIntoView();
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      behavior: "smooth",
+      block: "center",
+    });
+  });
+
+  it("does not scroll while the form is idle", async () => {
+    const scrollIntoView = stubScrollIntoView();
+    renderForm();
+    await selectInquiry("General Question");
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("does not scroll while the submission is still in flight", async () => {
+    const scrollIntoView = stubScrollIntoView();
+    // Never settles, so the component stays in `submitting`.
+    fetchMock.mockReturnValue(new Promise<Response>(() => {}));
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /submitting/i }),
+      ).toBeDisabled(),
+    );
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("does not scroll when the submission fails", async () => {
+    const scrollIntoView = stubScrollIntoView();
+    fetchMock.mockResolvedValue(
+      new Response("<!doctype html><h1>Success</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    );
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Something went wrong/i,
+    );
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("still renders the success panel when the host page has no scrollIntoView", async () => {
+    // No stub installed on purpose: jsdom leaves `scrollIntoView` undefined,
+    // which mirrors an embedding page that does not implement it. A failed
+    // scroll must never take the submission down with it.
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Thanks!");
   });
 });
 
