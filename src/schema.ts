@@ -31,8 +31,16 @@ export { INQUIRY_TYPES, type InquiryType } from "../worker/src/limits";
 
 import type { InquiryType } from "../worker/src/limits";
 
-export const COMPANY_SIZES = ["1-50", "51-200", "201-1,000", "1,000+"] as const;
-
+/**
+ * Company Size and Expected Timeline used to live here. Both were dropped from
+ * the engagement flows: they were left blank far more often than not, and the
+ * longer form measurably hurt conversion against the much shorter candidate
+ * flow. Their option lists are gone with them.
+ *
+ * `companySize` and `expectedTimeline` nonetheless remain on the Zapier wire as
+ * permanently empty strings — see `worker/src/payload.ts`. That is a TRANSPORT
+ * concern, not a form one, so nothing about it belongs in this file.
+ */
 export const BUDGETS = [
   "Not yet defined",
   "Under $50K",
@@ -40,8 +48,6 @@ export const BUDGETS = [
   "$150K – $300K",
   "$300K+",
 ] as const;
-
-export const TIMELINES = ["ASAP", "1-3 months", "1-6 months", "6+ months"] as const;
 
 /**
  * File constraints for the Submit Resume flow.
@@ -152,13 +158,12 @@ const commonShape = {
 /**
  * Company details, collected only by the engagement flows (Consulting and
  * Recruitment / Hiring). Submit Resume deliberately omits these: a candidate
- * applies as an individual, so asking for their title, employer, and employer
- * headcount is noise we never act on.
+ * applies as an individual, so asking for their title and employer is noise we
+ * never act on.
  */
 const companyDetailsShape = {
   title: requiredString("Title"),
   company: requiredString("Company"),
-  companySize: optionalEnum(COMPANY_SIZES),
 };
 
 // ---------------------------------------------------------------------------
@@ -176,7 +181,6 @@ const engagementShape = {
   ...companyDetailsShape,
   phone: optionalPhone,
   estimatedBudget: optionalEnum(BUDGETS),
-  expectedTimeline: optionalEnum(TIMELINES),
 };
 
 const consultingSchema = z.object({
@@ -239,9 +243,7 @@ export type ContactFormFields = {
   title: string;
   company: string;
   phone: string;
-  companySize: string;
   estimatedBudget: string;
-  expectedTimeline: string;
   message: string;
   resume: File | FileList | null;
   website: string; // honeypot

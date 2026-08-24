@@ -27,14 +27,19 @@
  * | `title`            | Consulting, Recruitment / Hiring                     |
  * | `company`          | Consulting, Recruitment / Hiring                     |
  * | `phone`            | Consulting, Recruitment / Hiring, Submit Resume      |
- * | `companySize`      | Consulting, Recruitment / Hiring                     |
+ * | `companySize`      | never — no longer collected, always empty            |
  * | `estimatedBudget`  | Consulting, Recruitment / Hiring                     |
- * | `expectedTimeline` | Consulting, Recruitment / Hiring                     |
+ * | `expectedTimeline` | never — no longer collected, always empty            |
  * | `message`          | always                                               |
  * | `resumeUrl`        | Submit Resume                                        |
  * | `resumeFileName`   | Submit Resume                                        |
  * | `source`           | when the embed sets `data-source`                    |
  * | `submittedAt`      | always                                               |
+ *
+ * `companySize` and `expectedTimeline` were retired from the form because they
+ * hurt conversion, but they REMAIN on the wire as constant empty strings. See
+ * the note on {@link ZapierPayload}: removing a key the client's live Zap has
+ * already mapped is what breaks it. Retired is not the same as removed.
  */
 export const ZAPIER_PAYLOAD_KEYS = [
   "inquiryType",

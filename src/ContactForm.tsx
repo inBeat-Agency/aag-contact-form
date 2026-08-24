@@ -3,10 +3,8 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   BUDGETS,
-  COMPANY_SIZES,
   contactFormSchema,
   INQUIRY_TYPES,
-  TIMELINES,
   type ContactFormFields,
 } from "./schema";
 import {
@@ -35,17 +33,15 @@ const DEFAULT_VALUES: ContactFormFields = {
   title: "",
   company: "",
   phone: "",
-  companySize: "",
   estimatedBudget: "",
-  expectedTimeline: "",
   message: "",
   resume: null,
   website: "",
 };
 
-// Which extra field groups each inquiry type reveals. Title, Company, Company
-// Size, Budget and Timeline are engagement-only; Submit Resume collects a phone
-// number but no company details.
+// Which extra field groups each inquiry type reveals. Title, Company and
+// Estimated Budget are engagement-only; Submit Resume collects a phone number
+// but no company details.
 const SHOWS_ENGAGEMENT_FIELDS = new Set(["Consulting", "Recruitment / Hiring"]);
 const SHOWS_PHONE_FIELD = new Set([
   "Consulting",
@@ -86,9 +82,7 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
     resetField("title");
     resetField("company");
     resetField("phone");
-    resetField("companySize");
     resetField("estimatedBudget");
-    resetField("expectedTimeline");
     resetField("resume");
   }
 
@@ -165,9 +159,12 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
 
   // `.aag-form-row` is a hard two-column grid, so a lone Phone inside one would
   // render at half width with a dead gap beside it on desktop and in the
-  // half-page embed. Phone keeps its Company Size partner in the engagement
-  // rows; in the Submit Resume flow the same element is rendered outside the
-  // row so it spans full width, like Work Email and the message textarea.
+  // half-page embed. Phone is therefore paired with Estimated Budget in the
+  // engagement rows — the two selects it used to sit beside, Company Size and
+  // Expected Timeline, are gone, and leaving either survivor alone in a row is
+  // exactly the half-width gap this note exists to prevent. In the Submit
+  // Resume flow the same element is rendered outside the row so it spans full
+  // width, like Work Email and the message textarea.
   const phoneField = showPhone ? (
     <TextField
       id="aag-form-phone"
@@ -277,22 +274,6 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
           <div className="aag-form-row">
             {phoneField}
             <SelectField
-              id="aag-form-companySize"
-              label="Company Size"
-              optional
-              placeholder="Select an option"
-              options={COMPANY_SIZES}
-              error={errors.companySize?.message}
-              {...register("companySize")}
-            />
-          </div>
-        ) : (
-          phoneField
-        )}
-
-        {showEngagement ? (
-          <div className="aag-form-row">
-            <SelectField
               id="aag-form-estimatedBudget"
               label="Estimated Budget"
               optional
@@ -301,17 +282,10 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
               error={errors.estimatedBudget?.message}
               {...register("estimatedBudget")}
             />
-            <SelectField
-              id="aag-form-expectedTimeline"
-              label="Expected Timeline"
-              optional
-              placeholder="Select an option"
-              options={TIMELINES}
-              error={errors.expectedTimeline?.message}
-              {...register("expectedTimeline")}
-            />
           </div>
-        ) : null}
+        ) : (
+          phoneField
+        )}
 
         {showResume ? (
           <FileField

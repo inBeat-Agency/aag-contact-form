@@ -20,6 +20,11 @@ export type SubmitResult =
  * keys so the backend contract is simple. Empty optional values are omitted so
  * the server receives a clean payload. The resume File is appended only when
  * present.
+ *
+ * `companySize` and `expectedTimeline` are absent here BY DESIGN: the form no
+ * longer collects them. They are still part of the Zapier wire contract and are
+ * coined as empty strings by `worker/src/payload.ts`, which is the only place
+ * that concern belongs. Do not re-add them to this body to "match" the payload.
  */
 export function buildFormData(
   values: ContactFormFields,
@@ -41,9 +46,7 @@ export function buildFormData(
   appendIfPresent("title", values.title);
   appendIfPresent("company", values.company);
   appendIfPresent("phone", values.phone);
-  appendIfPresent("companySize", values.companySize);
   appendIfPresent("estimatedBudget", values.estimatedBudget);
-  appendIfPresent("expectedTimeline", values.expectedTimeline);
 
   const resume = values.resume instanceof File ? values.resume : values.resume?.[0];
   if (resume) data.append("resume", resume, resume.name);

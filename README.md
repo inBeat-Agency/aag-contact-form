@@ -225,12 +225,17 @@ Flat, camelCase keys. Optional fields are omitted when empty.
 | `title` | string | engagement types | Consulting / Recruitment only. **Not sent for Submit Resume.** |
 | `company` | string | engagement types | Same as above |
 | `phone` | string | optional | Loosely validated. Consulting / Recruitment / Submit Resume |
-| `companySize` | string | optional | Consulting / Recruitment only: `1-50`, `51-200`, `201-1,000`, `1,000+`. **Not sent for Submit Resume.** |
 | `estimatedBudget` | string | optional | Consulting / Recruitment only: `Not yet defined`, `Under $50K`, `$50K – $150K`, `$150K – $300K`, `$300K+` |
-| `expectedTimeline` | string | optional | Consulting / Recruitment only: `ASAP`, `1-3 months`, `1-6 months`, `6+ months` |
 | `resume` | File | Submit Resume only | `.pdf/.doc/.docx`, ≤ 10MB |
 | `source` | string | when configured | Value of `data-source` |
 | `website` | — | never sent | Honeypot; if a bot fills it the client fakes success and never calls the API |
+
+> **`companySize` and `expectedTimeline` are no longer collected.** The form
+> dropped both from Consulting and Recruitment / Hiring — they were routinely
+> left blank and the longer form hurt conversion. The widget never sends them,
+> so they are absent from this multipart body entirely. They still exist on the
+> **Zapier** side of the contract as permanently empty strings, coined by the
+> Worker; see [Zapier JSON payload](#zapier-json-payload). Retired, not removed.
 
 The canonical contract lives in [`src/schema.ts`](./src/schema.ts) as zod
 schemas and exported TypeScript types — copy it to mirror validation on the
@@ -456,9 +461,9 @@ dropping empty keys.**
 | `title` | |
 | `company` | |
 | `phone` | Free-form |
-| `companySize` | `1-50`, `51-200`, `201-1,000`, `1,000+` |
+| `companySize` | **Retired — always `""`.** No longer collected by any inquiry type |
 | `estimatedBudget` | `Not yet defined`, `Under $50K`, `$50K – $150K`, `$150K – $300K`, `$300K+` |
-| `expectedTimeline` | `ASAP`, `1-3 months`, `1-6 months`, `6+ months` |
+| `expectedTimeline` | **Retired — always `""`.** No longer collected by any inquiry type |
 | `message` | |
 | `resumeUrl` | Object-storage URL written by the Worker after upload |
 | `resumeFileName` | Original file name of the uploaded resume |
@@ -471,10 +476,16 @@ Population by inquiry type — `•` populated, `""` always empty:
 | --- | --- | --- | --- | --- |
 | `inquiryType`, `firstName`, `lastName`, `workEmail`, `message`, `source`, `submittedAt` | • | • | • | • |
 | `title`, `company` | `""` | • required | • required | `""` |
-| `companySize` | `""` | • optional | • optional | `""` |
 | `phone` | `""` | • optional | • optional | • optional |
-| `estimatedBudget`, `expectedTimeline` | `""` | • optional | • optional | `""` |
+| `estimatedBudget` | `""` | • optional | • optional | `""` |
+| `companySize`, `expectedTimeline` | `""` | `""` | `""` | `""` |
 | `resumeUrl`, `resumeFileName` | `""` | `""` | `""` | • |
+
+> **`companySize` and `expectedTimeline` are retired, not removed.** The form
+> stopped collecting them, so they are now empty for *every* inquiry type — but
+> they stay in the payload because the live Zap has already mapped them, and
+> Zapier rebuilds its field-mapping picker from the last sample it received.
+> Dropping the keys would silently break that mapping. Keep sending them empty.
 
 > **Branch on `inquiryType` only.** Never write a Zapier Filter or Path that
 > matches on `estimatedBudget`. Its range values use an **EN DASH** (`–`,

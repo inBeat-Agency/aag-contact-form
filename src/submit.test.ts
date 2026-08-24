@@ -18,9 +18,7 @@ function makeFields(
     title: "Head of Talent",
     company: "Acme Inc.",
     phone: "+1 555 000 0000",
-    companySize: "51-200",
     estimatedBudget: "$50K – $150K",
-    expectedTimeline: "1-3 months",
     message: "We need help with hiring.",
     resume: null,
     website: "",
@@ -58,9 +56,7 @@ describe("buildFormData", () => {
         title: "",
         company: "",
         phone: "",
-        companySize: "",
         estimatedBudget: "",
-        expectedTimeline: "",
       }),
       "webflow-home",
     );
@@ -80,9 +76,7 @@ describe("buildFormData", () => {
         title: "",
         company: "",
         phone: "",
-        companySize: "",
         estimatedBudget: "",
-        expectedTimeline: "",
         website: "spam",
       }),
       null,
@@ -91,9 +85,7 @@ describe("buildFormData", () => {
     expect(data.has("title")).toBe(false);
     expect(data.has("company")).toBe(false);
     expect(data.has("phone")).toBe(false);
-    expect(data.has("companySize")).toBe(false);
     expect(data.has("estimatedBudget")).toBe(false);
-    expect(data.has("expectedTimeline")).toBe(false);
     // Honeypot is a transport-layer concern handled by the component, not here.
     expect(data.has("website")).toBe(false);
     // No source passed => no source key.
@@ -106,10 +98,38 @@ describe("buildFormData", () => {
     expect(data.get("title")).toBe("Head of Talent");
     expect(data.get("company")).toBe("Acme Inc.");
     expect(data.get("phone")).toBe("+1 555 000 0000");
-    expect(data.get("companySize")).toBe("51-200");
     expect(data.get("estimatedBudget")).toBe("$50K – $150K");
-    expect(data.get("expectedTimeline")).toBe("1-3 months");
   });
+
+  /**
+   * Company Size and Expected Timeline are no longer collected by any inquiry
+   * type. The multipart body must not carry them at all — the Worker supplies
+   * the two wire-contract keys as empty strings, which is what keeps the Zapier
+   * field-mapping picker stable. See `worker/src/payload.ts`.
+   *
+   * The retired keys are injected here through a cast ON PURPOSE. Dropping them
+   * from `ContactFormFields` makes TypeScript the first line of defence, but
+   * types are erased at runtime: a stale embed, a cached bundle or a hand-rolled
+   * caller can still hand us the old shape. This proves `buildFormData` ignores
+   * them rather than merely never being offered them.
+   */
+  it.each(["Consulting", "Recruitment / Hiring"] as const)(
+    "never sends Company Size or Expected Timeline for %s",
+    (inquiryType) => {
+      const stale = {
+        ...makeFields({ inquiryType }),
+        companySize: "51-200",
+        expectedTimeline: "1-3 months",
+      } as ContactFormFields;
+
+      const data = buildFormData(stale, "src");
+
+      expect(data.has("companySize")).toBe(false);
+      expect(data.has("expectedTimeline")).toBe(false);
+      // Guard the guard: the engagement fields that DID survive still ship.
+      expect(data.get("estimatedBudget")).toBe("$50K – $150K");
+    },
+  );
 
   it("appends the File under the resume key when present", () => {
     const file = new File(["cv"], "cv.pdf", { type: "application/pdf" });
