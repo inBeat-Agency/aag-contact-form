@@ -151,7 +151,7 @@ describe("toZapierPayload", () => {
 
   /**
    * The engagement flows are the ones that USED to populate these two keys.
-   * Now that the widget no longer collects them, `readText()` must still coin
+   * Now that the widget no longer collects them, the transform must still coin
    * them as empty strings so the Zapier mapping keeps resolving.
    */
   it.each(["consulting", "recruitment-hiring"] as const)(
@@ -167,6 +167,51 @@ describe("toZapierPayload", () => {
       expect(Object.keys(payload)).toHaveLength(ZAPIER_PAYLOAD_KEYS.length);
     },
   );
+
+  /**
+   * The retirement contract is about the WIRE, not about the current widget.
+   * After a deploy, a cached copy of the previous bundle — CDN edge or browser
+   * — keeps POSTing `companySize` and `expectedTimeline`, and any value that
+   * survived the transform would land in the client's live Zap as data the form
+   * no longer collects.
+   *
+   * The FormData here is hand-rolled on purpose. Every other case in this file
+   * goes through `buildFormData()`, which already omits both keys, so it can
+   * only ever prove they are absent — never that a supplied value is dropped.
+   */
+  it("pins the retired keys to empty even when the submission supplies them", () => {
+    const formData = new FormData();
+    formData.set("inquiryType", "Consulting");
+    formData.set("firstName", "Felipe");
+    formData.set("lastName", "Test");
+    formData.set("workEmail", "felipe.test+stale-bundle@example.com");
+    formData.set("title", "TEST TITLE");
+    formData.set("company", "TEST COMPANY (DO NOT CONTACT)");
+    formData.set("phone", "+1 (555) 555-0100");
+    formData.set("estimatedBudget", "$50K \u2013 $150K");
+    formData.set("message", "[TEST DATA] Sent by a stale cached widget bundle.");
+    // The retired pair, exactly as the previous bundle used to send it.
+    formData.set("companySize", "201-500 employees");
+    formData.set("expectedTimeline", "1-3 months");
+
+    // Guard the guard: the input really does carry the retired values.
+    expect(formData.get("companySize")).toBe("201-500 employees");
+    expect(formData.get("expectedTimeline")).toBe("1-3 months");
+
+    const payload = toZapierPayload(formData, {
+      submittedAt: "2026-07-30T14:18:41.000Z",
+    });
+
+    expect(payload.companySize).toBe("");
+    expect(payload.expectedTimeline).toBe("");
+
+    // The lead itself must still go through: a stale embed is a real customer,
+    // so the two retired values are discarded, never the submission.
+    expect(payload.firstName).toBe("Felipe");
+    expect(payload.workEmail).toBe("felipe.test+stale-bundle@example.com");
+    expect(payload.estimatedBudget).toBe("$50K \u2013 $150K");
+    expect(Object.keys(payload)).toEqual([...ZAPIER_PAYLOAD_KEYS]);
+  });
 
   it("never leaks the resume File into the payload", () => {
     const fixture = readFixture("submit-resume");

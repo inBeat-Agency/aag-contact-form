@@ -112,9 +112,16 @@ export function toZapierPayload(
     title: readText(formData, "title"),
     company: readText(formData, "company"),
     phone: readText(formData, "phone"),
-    companySize: readText(formData, "companySize"),
+    // Retired, and therefore hardcoded rather than read. Do NOT "restore" these
+    // to `readText()`: after a deploy, a cached copy of the previous widget
+    // bundle (CDN edge or browser) keeps POSTing both keys, and reading them
+    // would forward data the form no longer collects straight into the client's
+    // live Zap — contradicting the retirement contract documented above. The
+    // submission still succeeds; only these two values are dropped, because a
+    // stale embed is a real lead we refuse to lose over a cache window.
+    companySize: "",
     estimatedBudget: readText(formData, "estimatedBudget"),
-    expectedTimeline: readText(formData, "expectedTimeline"),
+    expectedTimeline: "",
     message: readText(formData, "message"),
     resumeUrl: options.resumeUrl ?? "",
     resumeFileName: options.resumeFileName ?? "",
