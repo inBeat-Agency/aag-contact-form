@@ -3,12 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { buildFormData } from "../../src/submit";
-import {
-  BUDGETS,
-  COMPANY_SIZES,
-  INQUIRY_TYPES,
-  TIMELINES,
-} from "../../src/schema";
+import { BUDGETS, INQUIRY_TYPES } from "../../src/schema";
 import type { ContactFormFields } from "../../src/schema";
 import {
   toZapierPayload,
@@ -67,9 +62,7 @@ function widgetFieldsFor(
     title: fixture.title,
     company: fixture.company,
     phone: fixture.phone,
-    companySize: fixture.companySize,
     estimatedBudget: fixture.estimatedBudget,
-    expectedTimeline: fixture.expectedTimeline,
     message: fixture.message,
     resume,
     website: "", // honeypot, never transported
@@ -156,6 +149,70 @@ describe("toZapierPayload", () => {
     expect(Object.keys(payload)).toHaveLength(ZAPIER_PAYLOAD_KEYS.length);
   });
 
+  /**
+   * The engagement flows are the ones that USED to populate these two keys.
+   * Now that the widget no longer collects them, the transform must still coin
+   * them as empty strings so the Zapier mapping keeps resolving.
+   */
+  it.each(["consulting", "recruitment-hiring"] as const)(
+    "%s still emits companySize and expectedTimeline as empty strings",
+    (name) => {
+      const payload = transformFixture(readFixture(name));
+
+      expect(payload.companySize).toBe("");
+      expect(payload.expectedTimeline).toBe("");
+      // Guard the guard: this really is an engagement payload, not a blank one.
+      expect(payload.title).not.toBe("");
+      expect(payload.company).not.toBe("");
+      expect(Object.keys(payload)).toHaveLength(ZAPIER_PAYLOAD_KEYS.length);
+    },
+  );
+
+  /**
+   * The retirement contract is about the WIRE, not about the current widget.
+   * After a deploy, a cached copy of the previous bundle — CDN edge or browser
+   * — keeps POSTing `companySize` and `expectedTimeline`, and any value that
+   * survived the transform would land in the client's live Zap as data the form
+   * no longer collects.
+   *
+   * The FormData here is hand-rolled on purpose. Every other case in this file
+   * goes through `buildFormData()`, which already omits both keys, so it can
+   * only ever prove they are absent — never that a supplied value is dropped.
+   */
+  it("pins the retired keys to empty even when the submission supplies them", () => {
+    const formData = new FormData();
+    formData.set("inquiryType", "Consulting");
+    formData.set("firstName", "Felipe");
+    formData.set("lastName", "Test");
+    formData.set("workEmail", "felipe.test+stale-bundle@example.com");
+    formData.set("title", "TEST TITLE");
+    formData.set("company", "TEST COMPANY (DO NOT CONTACT)");
+    formData.set("phone", "+1 (555) 555-0100");
+    formData.set("estimatedBudget", "$50K \u2013 $150K");
+    formData.set("message", "[TEST DATA] Sent by a stale cached widget bundle.");
+    // The retired pair, exactly as the previous bundle used to send it.
+    formData.set("companySize", "201-500 employees");
+    formData.set("expectedTimeline", "1-3 months");
+
+    // Guard the guard: the input really does carry the retired values.
+    expect(formData.get("companySize")).toBe("201-500 employees");
+    expect(formData.get("expectedTimeline")).toBe("1-3 months");
+
+    const payload = toZapierPayload(formData, {
+      submittedAt: "2026-07-30T14:18:41.000Z",
+    });
+
+    expect(payload.companySize).toBe("");
+    expect(payload.expectedTimeline).toBe("");
+
+    // The lead itself must still go through: a stale embed is a real customer,
+    // so the two retired values are discarded, never the submission.
+    expect(payload.firstName).toBe("Felipe");
+    expect(payload.workEmail).toBe("felipe.test+stale-bundle@example.com");
+    expect(payload.estimatedBudget).toBe("$50K \u2013 $150K");
+    expect(Object.keys(payload)).toEqual([...ZAPIER_PAYLOAD_KEYS]);
+  });
+
   it("never leaks the resume File into the payload", () => {
     const fixture = readFixture("submit-resume");
     const file = resumeFileFor(fixture);
@@ -208,14 +265,24 @@ describe("golden fixtures", () => {
     expect(INQUIRY_TYPES as readonly string[]).toContain(fixture.inquiryType);
 
     // Optional selects are either unset ("") or an exact schema option.
-    if (fixture.companySize) {
-      expect(COMPANY_SIZES as readonly string[]).toContain(fixture.companySize);
-    }
     if (fixture.estimatedBudget) {
       expect(BUDGETS as readonly string[]).toContain(fixture.estimatedBudget);
     }
-    if (fixture.expectedTimeline) {
-      expect(TIMELINES as readonly string[]).toContain(fixture.expectedTimeline);
+  });
+
+  /**
+   * Company Size and Expected Timeline are no longer collected by ANY inquiry
+   * type, but they stay on the wire as constant empty strings. Zapier builds
+   * its field-mapping picker from whichever sample payload it last received, so
+   * dropping the keys would silently break the client's live Zap. Every fixture
+   * must therefore still carry both, and always empty.
+   */
+  it.each(FIXTURE_NAMES)("%s carries the retired keys as empty strings", (name) => {
+    const fixture = readFixture(name);
+
+    for (const key of ["companySize", "expectedTimeline"] as const) {
+      expect(Object.keys(fixture)).toContain(key);
+      expect(fixture[key]).toBe("");
     }
   });
 

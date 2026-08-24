@@ -196,13 +196,35 @@ describe("ContactForm — conditional field disclosure", () => {
     expect(screen.getByLabelText("Title")).toBeInTheDocument();
     expect(screen.getByLabelText("Company")).toBeInTheDocument();
     expect(screen.getByLabelText(/Phone/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Company Size/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Estimated Budget/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Expected Timeline/)).toBeInTheDocument();
 
     // No resume field for Consulting.
     expect(screen.queryByLabelText("Upload Resume")).not.toBeInTheDocument();
   });
+
+  /**
+   * Company Size and Expected Timeline were removed from the engagement flows:
+   * users left them blank and the longer form hurt conversion. The shorter
+   * candidate form converts measurably better, so the engagement flows now stop
+   * at Estimated Budget.
+   */
+  it.each(["Consulting", "Recruitment / Hiring"])(
+    "%s no longer renders Company Size or Expected Timeline",
+    async (inquiryType) => {
+      renderForm();
+      await selectInquiry(inquiryType);
+
+      expect(screen.queryByLabelText(/Company Size/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByLabelText(/Expected Timeline/),
+      ).not.toBeInTheDocument();
+
+      // Guard the guard: this is the flow that USED to render them, so the
+      // fields that survived must still be here.
+      expect(screen.getByLabelText(/^Phone/)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Estimated Budget/)).toBeInTheDocument();
+    },
+  );
 
   it.each(["Consulting", "Recruitment / Hiring"])(
     "groups every %s field pair in a two-column row contract",
@@ -210,11 +232,14 @@ describe("ContactForm — conditional field disclosure", () => {
       renderForm();
       await selectInquiry(inquiryType);
 
+      // Phone pairs with Estimated Budget now that Company Size and Expected
+      // Timeline are gone. `.aag-form-row` is a hard 1fr 1fr grid, so leaving
+      // either of these alone in a row would render it at half width with a
+      // dead gap beside it.
       const pairs = [
         ["First Name", "Last Name"],
         ["Title", "Company"],
-        [/^Phone/, /Company Size/],
-        [/Estimated Budget/, /Expected Timeline/],
+        [/^Phone/, /Estimated Budget/],
       ] as const;
 
       for (const [firstLabel, secondLabel] of pairs) {
@@ -227,6 +252,34 @@ describe("ContactForm — conditional field disclosure", () => {
       }
     },
   );
+
+  /**
+   * The pairing test above proves the fields we EXPECT together are together.
+   * This proves the other half: no row was left holding a single field.
+   *
+   * Removing a paired select is exactly how `.aag-form-row` — a hard 1fr 1fr
+   * grid — ends up rendering its lone survivor at half width with a dead gap
+   * beside it on desktop and in the half-page embed. Enumerating expected pairs
+   * cannot catch that, because an orphaned row simply is not in the list.
+   */
+  it.each([
+    "General Question",
+    "Consulting",
+    "Recruitment / Hiring",
+    "Submit Resume",
+  ])("leaves no half-width orphan in a %s two-column row", async (inquiryType) => {
+    const { container } = renderForm();
+    await selectInquiry(inquiryType);
+
+    const rows = [...container.querySelectorAll(".aag-form-row")];
+
+    // Guard the guard: a flow that rendered no rows at all would pass vacuously.
+    expect(rows.length).toBeGreaterThan(0);
+
+    for (const row of rows) {
+      expect(row.children.length, `"${row.className}" is not a full pair`).toBe(2);
+    }
+  });
 
   it("Submit Resume reveals the file input but no company details", async () => {
     renderForm();
@@ -246,14 +299,14 @@ describe("ContactForm — conditional field disclosure", () => {
   });
 
   it.each(["Consulting", "Recruitment / Hiring"])(
-    "%s still collects Title, Company and Company Size",
+    "%s still collects Title, Company and Estimated Budget",
     async (inquiryType) => {
       renderForm();
       await selectInquiry(inquiryType);
 
       expect(screen.getByLabelText("Title")).toBeInTheDocument();
       expect(screen.getByLabelText("Company")).toBeInTheDocument();
-      expect(screen.getByLabelText(/Company Size/)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Estimated Budget/)).toBeInTheDocument();
     },
   );
 
@@ -408,7 +461,10 @@ describe("ContactForm — Submit Resume submission", () => {
     // Fill the engagement-only fields, then switch away from that flow.
     await user.type(screen.getByLabelText("Title"), "Head of Talent");
     await user.type(screen.getByLabelText("Company"), "Acme Inc.");
-    await user.selectOptions(screen.getByLabelText(/Company Size/), "51-200");
+    await user.selectOptions(
+      screen.getByLabelText(/Estimated Budget/),
+      "$50K – $150K",
+    );
 
     await user.selectOptions(
       screen.getByLabelText("Inquiry type"),
@@ -435,7 +491,10 @@ describe("ContactForm — Submit Resume submission", () => {
     // contract keys in when it builds the flat Zapier payload.
     expect(body.has("title")).toBe(false);
     expect(body.has("company")).toBe(false);
+    expect(body.has("estimatedBudget")).toBe(false);
+    // Removed from the form entirely, so no flow can ever send them.
     expect(body.has("companySize")).toBe(false);
+    expect(body.has("expectedTimeline")).toBe(false);
   });
 });
 

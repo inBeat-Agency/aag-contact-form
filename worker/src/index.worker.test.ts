@@ -1104,9 +1104,7 @@ function maximalValidSubmission(): FormData {
   }
   const local = "a".repeat(MAX_TEXT_FIELD_BYTES - "@example.com".length);
   form.append("workEmail", `${local}@example.com`);
-  form.append("companySize", "51-200");
   form.append("estimatedBudget", "$50K – $150K");
-  form.append("expectedTimeline", "ASAP");
   form.append("source", "aag-contact-form");
   form.append("website", "");
 
@@ -1669,9 +1667,7 @@ function widgetFieldsFor(
     title: fixture.title,
     company: fixture.company,
     phone: fixture.phone,
-    companySize: fixture.companySize,
     estimatedBudget: fixture.estimatedBudget,
-    expectedTimeline: fixture.expectedTimeline,
     message: fixture.message,
     resume,
     website: "",

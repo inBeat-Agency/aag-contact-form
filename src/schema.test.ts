@@ -81,9 +81,7 @@ describe("Consulting / Recruitment (engagement)", () => {
       inquiryType: "Recruitment / Hiring",
       ...engagement,
       phone: "+1 555 000 0000",
-      companySize: "51-200",
       estimatedBudget: "$50K – $150K",
-      expectedTimeline: "1-3 months",
     });
     expect(result.success).toBe(true);
   });
@@ -93,17 +91,40 @@ describe("Consulting / Recruitment (engagement)", () => {
       inquiryType: "Consulting",
       ...engagement,
       phone: "",
-      companySize: "",
       estimatedBudget: "",
-      expectedTimeline: "",
     });
     expect(result.success).toBe(true);
     if (result.success && result.data.inquiryType === "Consulting") {
-      expect(result.data.companySize).toBeUndefined();
       expect(result.data.estimatedBudget).toBeUndefined();
       expect(result.data.phone).toBeUndefined();
     }
   });
+
+  /**
+   * Company Size and Expected Timeline were dropped from both engagement
+   * flows: users skipped them and the longer form measurably hurt conversion.
+   * They survive on the Zapier wire as constant empty strings, produced by the
+   * Worker — never by the schema. Passing them here must therefore be a no-op,
+   * and zod strips unknown keys silently, so assert on the parsed OUTPUT rather
+   * than on `success`.
+   */
+  it.each(["Consulting", "Recruitment / Hiring"] as const)(
+    "%s no longer parses Company Size or Expected Timeline",
+    (inquiryType) => {
+      const result = contactFormSchema.safeParse({
+        inquiryType,
+        ...engagement,
+        companySize: "51-200",
+        expectedTimeline: "1-3 months",
+      });
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data).not.toHaveProperty("companySize");
+        expect(result.data).not.toHaveProperty("expectedTimeline");
+      }
+    },
+  );
 
   it("rejects a missing required company", () => {
     const result = contactFormSchema.safeParse({
@@ -119,14 +140,14 @@ describe("Consulting / Recruitment (engagement)", () => {
     const result = contactFormSchema.safeParse({
       inquiryType: "Consulting",
       ...engagement,
-      companySize: "500-ish",
+      estimatedBudget: "roughly a lot",
     });
     expect(result.success).toBe(false);
   });
 });
 
 describe("Submit Resume", () => {
-  // Candidates apply as individuals: no title/company/companySize collected.
+  // Candidates apply as individuals: no title or company collected.
   const resumeBase = { ...baseContact };
 
   it("accepts a submission without any company details", () => {
@@ -144,7 +165,6 @@ describe("Submit Resume", () => {
       ...resumeBase,
       title: "Senior Engineer",
       company: "Acme Inc.",
-      companySize: "51-200",
       resume: makeFile("cv.pdf", "application/pdf", 1024),
     });
 
@@ -152,7 +172,6 @@ describe("Submit Resume", () => {
     if (result.success) {
       expect(result.data).not.toHaveProperty("title");
       expect(result.data).not.toHaveProperty("company");
-      expect(result.data).not.toHaveProperty("companySize");
     }
   });
 

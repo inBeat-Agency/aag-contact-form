@@ -29,8 +29,18 @@ const PERMITTED_WORKER_IMPORTS = ["../worker/src/limits"];
  * Deliberately NOT the whole 15-key contract: `resumeUrl` is legitimately read
  * from the Worker's response by `src/submit.ts`, so asserting the full key set
  * absent would be a false alarm.
+ *
+ * `companySize` and `expectedTimeline` joined this list when the form stopped
+ * collecting them. They are still emitted to Zapier, but ONLY by the Worker and
+ * only as empty strings, so the widget has no remaining reason to name them.
+ * Their reappearance here would mean the retired fields crept back into the UI.
  */
-const SERVER_ONLY_PAYLOAD_KEYS = ["resumeFileName", "submittedAt"];
+const SERVER_ONLY_PAYLOAD_KEYS = [
+  "companySize",
+  "expectedTimeline",
+  "resumeFileName",
+  "submittedAt",
+];
 
 /** Every `.ts`/`.tsx` file under `src/` that ships, i.e. excluding tests. */
 function productionSourceFiles(): string[] {
