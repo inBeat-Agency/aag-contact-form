@@ -40,14 +40,18 @@ import type { InquiryType } from "../worker/src/limits";
  * `companySize` and `expectedTimeline` nonetheless remain on the Zapier wire as
  * permanently empty strings — see `worker/src/payload.ts`. That is a TRANSPORT
  * concern, not a form one, so nothing about it belongs in this file.
+ *
+ * Estimated Budget's option list (`BUDGETS`) is gone too, for a different
+ * reason: the field is still collected, but as free text. A prospect who does
+ * not recognise themselves in any of the five brackets we happened to pick
+ * either skips the field or picks the wrong one, and a wrong bracket is worse
+ * than a sentence we can read. See `optionalText` below for what replaced it.
+ *
+ * That leaves `INQUIRY_TYPES` as the only option constant this section still
+ * carries, and it is a re-export rather than a definition — so if the next
+ * fixed-choice field also becomes free text, delete this section rather than
+ * leaving an empty heading behind.
  */
-export const BUDGETS = [
-  "Not yet defined",
-  "Under $50K",
-  "$50K – $150K",
-  "$150K – $300K",
-  "$300K+",
-] as const;
 
 /**
  * File constraints for the Submit Resume flow.
@@ -95,20 +99,48 @@ const workEmail = withinLengthCap("Work email")(
     .email("Enter a valid work email address"),
 );
 
-// Phone is intentionally loose: optional, any non-empty free-form string is fine.
-const optionalPhone = z
-  .string()
-  .trim()
-  .max(MAX_TEXT_FIELD_CHARS, "Phone is too long")
-  .optional()
-  .transform((value) => (value === "" ? undefined : value));
-
-// Optional select: allow empty string (nothing chosen) or one of the options.
-const optionalEnum = <T extends readonly [string, ...string[]]>(values: T) =>
+/**
+ * An optional free-text field.
+ *
+ * Three behaviours travel together here, and separating them is how they drift:
+ * `.trim()` so whitespace is not an answer, `.max()` so the value is bounded,
+ * and the `"" -> undefined` transform so a skipped field is genuinely absent.
+ * That last one is load-bearing: `appendIfPresent` in `src/submit.ts` omits
+ * `undefined` from the multipart body, so a copy of this shape that forgot the
+ * transform would send `""` and the Worker could no longer tell "not asked" from
+ * "asked and left blank".
+ *
+ * `max` is a parameter rather than a constant because the shared cap is a
+ * CEILING, not a default — see `MAX_BUDGET_CHARS`.
+ */
+const optionalText = (label: string, max: number) =>
   z
-    .union([z.literal(""), z.enum(values)])
+    .string()
+    .trim()
+    .max(max, `${label} is too long`)
     .optional()
     .transform((value) => (value === "" ? undefined : value));
+
+// Phone is intentionally loose: optional, any non-empty free-form string is fine.
+const optionalPhone = optionalText("Phone", MAX_TEXT_FIELD_CHARS);
+
+/**
+ * Estimated Budget's own cap, deliberately far stricter than the shared one.
+ *
+ * `MAX_TEXT_FIELD_CHARS` (5461) exists to bound the REQUEST the Worker will
+ * accept; it is not a claim about what any single field ought to hold. Estimated
+ * Budget is a short answer — "around 60k, flexible" — and it lands in one Zapier
+ * column a human scans at a glance. Allowing five thousand characters there
+ * would let a prospect paste an entire brief into the field that is supposed to
+ * answer "how much", which is a data-quality failure rather than a safety one:
+ * nothing breaks, the column just stops being readable.
+ *
+ * The containment invariant documented above still holds, and holds trivially:
+ * 100 < `MAX_TEXT_FIELD_CHARS`, so every value this field accepts is a value the
+ * server accepts too. Tightening this number is always safe; raising it past the
+ * shared cap is the one change that would break containment.
+ */
+export const MAX_BUDGET_CHARS = 100;
 
 /**
  * Resume file validation. File inputs yield a FileList, so normalize its first
@@ -180,7 +212,7 @@ const engagementShape = {
   ...commonShape,
   ...companyDetailsShape,
   phone: optionalPhone,
-  estimatedBudget: optionalEnum(BUDGETS),
+  estimatedBudget: optionalText("Estimated budget", MAX_BUDGET_CHARS),
 };
 
 const consultingSchema = z.object({

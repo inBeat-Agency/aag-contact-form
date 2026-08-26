@@ -225,7 +225,7 @@ Flat, camelCase keys. Optional fields are omitted when empty.
 | `title` | string | engagement types | Consulting / Recruitment only. **Not sent for Submit Resume.** |
 | `company` | string | engagement types | Same as above |
 | `phone` | string | optional | Loosely validated. Consulting / Recruitment / Submit Resume |
-| `estimatedBudget` | string | optional | Consulting / Recruitment only: `Not yet defined`, `Under $50K`, `$50K – $150K`, `$150K – $300K`, `$300K+` |
+| `estimatedBudget` | string | optional | Free-form, ≤ 100 characters. Consulting / Recruitment only |
 | `resume` | File | Submit Resume only | `.pdf/.doc/.docx`, ≤ 10MB |
 | `source` | string | when configured | Value of `data-source` |
 | `website` | — | never sent | Honeypot; if a bot fills it the client fakes success and never calls the API |
@@ -462,7 +462,7 @@ dropping empty keys.**
 | `company` | |
 | `phone` | Free-form |
 | `companySize` | **Retired — always `""`.** No longer collected by any inquiry type |
-| `estimatedBudget` | `Not yet defined`, `Under $50K`, `$50K – $150K`, `$150K – $300K`, `$300K+` |
+| `estimatedBudget` | Free-form, ≤ 100 characters |
 | `expectedTimeline` | **Retired — always `""`.** No longer collected by any inquiry type |
 | `message` | |
 | `resumeUrl` | Object-storage URL written by the Worker after upload |
@@ -488,10 +488,12 @@ Population by inquiry type — `•` populated, `""` always empty:
 > Dropping the keys would silently break that mapping. Keep sending them empty.
 
 > **Branch on `inquiryType` only.** Never write a Zapier Filter or Path that
-> matches on `estimatedBudget`. Its range values use an **EN DASH** (`–`,
-> U+2013), not an ASCII hyphen (`-`) — `"$50K – $150K"` is correct and
-> `"$50K - $150K"` is not. An exact-match Filter built by retyping the value
-> will look right and silently never fire.
+> matches on `estimatedBudget`. It is **free text** the visitor types, so there
+> is no finite set of values to enumerate: `"around 60k"`, `"~$60,000"` and
+> `"sixty thousand"` are all the same answer and no exact-match Filter catches
+> more than one of them. A Filter built this way looks correct in the editor and
+> silently never fires. `inquiryType` is the only field in this payload with a
+> fixed, code-enforced set of values — branch on that and read the budget by eye.
 
 Four golden fixtures in [`worker/fixtures/`](./worker/fixtures) show one
 realistic payload per inquiry type. They are the contract artifact: read them
