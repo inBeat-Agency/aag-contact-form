@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { buildFormData } from "../../src/submit";
-import { BUDGETS, INQUIRY_TYPES } from "../../src/schema";
+import { INQUIRY_TYPES } from "../../src/schema";
 import type { ContactFormFields } from "../../src/schema";
 import {
   toZapierPayload,
@@ -259,15 +259,24 @@ describe("golden fixtures", () => {
     },
   );
 
+  /**
+   * `inquiryType` is the last fixed-choice field in the payload. Estimated
+   * Budget used to be checked here too, against a `BUDGETS` option list that no
+   * longer exists: the field is now free text, so a fixture's budget string is
+   * sample data rather than a value any code can be wrong about.
+   *
+   * A sibling test used to pin the EN DASH in those budget ranges, because a
+   * manual test once sent "$50K - $150K" (ASCII hyphen) and an exact-match
+   * Zapier Filter built by retyping the value would have looked correct and
+   * silently never fired. That specific trap is gone with the option list, but
+   * the general one is not: NEVER build a Zapier Filter or Path that matches on
+   * a free-text field, because there is no finite set of values to enumerate.
+   * The README states this as a contract note under "Zapier JSON payload".
+   */
   it.each(FIXTURE_NAMES)("%s only uses enum values from src/schema.ts", (name) => {
     const fixture = readFixture(name);
 
     expect(INQUIRY_TYPES as readonly string[]).toContain(fixture.inquiryType);
-
-    // Optional selects are either unset ("") or an exact schema option.
-    if (fixture.estimatedBudget) {
-      expect(BUDGETS as readonly string[]).toContain(fixture.estimatedBudget);
-    }
   });
 
   /**
@@ -283,25 +292,6 @@ describe("golden fixtures", () => {
     for (const key of ["companySize", "expectedTimeline"] as const) {
       expect(Object.keys(fixture)).toContain(key);
       expect(fixture[key]).toBe("");
-    }
-  });
-
-  it("uses the EN DASH in budget ranges, not an ASCII hyphen", () => {
-    // A manual test once sent "$50K - $150K" (ASCII hyphen) to Zapier. It would
-    // have silently broken any exact-match Filter step, because src/schema.ts
-    // ships "$50K \u2013 $150K". Pin the character explicitly.
-    const ranges = BUDGETS.filter((budget) => budget.includes("\u2013"));
-    expect(ranges.length).toBeGreaterThan(0);
-
-    const used = FIXTURE_NAMES.map((name) => readFixture(name).estimatedBudget).filter(
-      Boolean,
-    );
-    expect(used.length).toBeGreaterThan(0);
-
-    for (const budget of used) {
-      expect(budget).toContain("\u2013");
-      expect(budget).not.toMatch(/\d+K -/); // ASCII hyphen between amounts
-      expect(BUDGETS as readonly string[]).toContain(budget);
     }
   });
 });

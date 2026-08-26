@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   contactFormSchema,
   INQUIRY_TYPES,
+  MAX_BUDGET_CHARS,
   MAX_RESUME_BYTES,
   resumeFileSchema,
 } from "./schema";
@@ -76,7 +77,7 @@ describe("Consulting / Recruitment (engagement)", () => {
     expect(result.success).toBe(true);
   });
 
-  it("accepts recruitment with optional selects filled", () => {
+  it("accepts recruitment with the optional fields filled", () => {
     const result = contactFormSchema.safeParse({
       inquiryType: "Recruitment / Hiring",
       ...engagement,
@@ -86,7 +87,7 @@ describe("Consulting / Recruitment (engagement)", () => {
     expect(result.success).toBe(true);
   });
 
-  it("normalizes empty optional selects to undefined", () => {
+  it("normalizes empty optional fields to undefined", () => {
     const result = contactFormSchema.safeParse({
       inquiryType: "Consulting",
       ...engagement,
@@ -136,13 +137,122 @@ describe("Consulting / Recruitment (engagement)", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects an invalid optional select value", () => {
-    const result = contactFormSchema.safeParse({
-      inquiryType: "Consulting",
-      ...engagement,
-      estimatedBudget: "roughly a lot",
+  /**
+   * Estimated Budget stopped being a five-option dropdown and became free text.
+   * These are the tests that would have gone red against the enum, which is the
+   * only reason they are worth writing: an assertion that passes on both sides
+   * of this change proves nothing about it.
+   */
+  describe("Estimated Budget is free text, not an enum", () => {
+    function parseBudget(estimatedBudget: string) {
+      return contactFormSchema.safeParse({
+        inquiryType: "Consulting",
+        ...engagement,
+        estimatedBudget,
+      });
+    }
+
+    it.each([
+      "around 60k, flexible",
+      "roughly a lot",
+      "TBD — depends on scope",
+      "$75,000",
+      "not sure yet",
+    ])("accepts %p, which the old option list would have rejected", (budget) => {
+      const result = parseBudget(budget);
+
+      expect(result.success).toBe(true);
+      if (result.success && result.data.inquiryType === "Consulting") {
+        expect(result.data.estimatedBudget).toBe(budget);
+      }
     });
-    expect(result.success).toBe(false);
+
+    it("still accepts a value that used to be one of the options", () => {
+      // Widening the field must not narrow it: the five retired brackets are
+      // ordinary strings now, and the live Zap has historical rows using them.
+      const result = parseBudget("$50K – $150K");
+
+      expect(result.success).toBe(true);
+      if (result.success && result.data.inquiryType === "Consulting") {
+        expect(result.data.estimatedBudget).toBe("$50K – $150K");
+      }
+    });
+
+    it("accepts a value of exactly the budget cap", () => {
+      const result = parseBudget("9".repeat(MAX_BUDGET_CHARS));
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects a value one character over the budget cap", () => {
+      const result = parseBudget("9".repeat(MAX_BUDGET_CHARS + 1));
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0]?.message).toBe(
+          "Estimated budget is too long",
+        );
+      }
+    });
+
+    /**
+     * The point of the stricter cap. Free text without a bound would let an
+     * entire brief into the single Zapier column that is supposed to answer
+     * "how much", so the field must refuse a length the SHARED cap allows.
+     */
+    it("refuses a length the shared text cap would have allowed", () => {
+      expect(MAX_BUDGET_CHARS).toBeLessThan(MAX_TEXT_FIELD_CHARS);
+
+      const betweenTheTwoCaps = "9".repeat(MAX_TEXT_FIELD_CHARS);
+      expect(parseBudget(betweenTheTwoCaps).success).toBe(false);
+
+      // Guard the guard: that same string is fine in a field that really does
+      // use the shared cap, so the rejection above is the budget rule firing
+      // and not some unrelated limit.
+      const phoneResult = contactFormSchema.safeParse({
+        inquiryType: "Consulting",
+        ...engagement,
+        phone: betweenTheTwoCaps,
+      });
+      expect(phoneResult.success).toBe(true);
+    });
+
+    /**
+     * Containment against the server, in the direction that matters: the Worker
+     * enforces BYTES, so the widest possible encoding of the longest value this
+     * field accepts must still fit the server's per-field byte cap. Measured
+     * rather than reasoned, matching the shared-cap tests further down.
+     */
+    it("keeps the longest accepted budget inside the server's byte cap", () => {
+      const widest = "\u{1F600}".repeat(Math.floor(MAX_BUDGET_CHARS / 2));
+
+      expect(widest.length).toBe(MAX_BUDGET_CHARS);
+      expect(parseBudget(widest).success).toBe(true);
+      expect(utf8ByteLength(widest)).toBeLessThanOrEqual(MAX_TEXT_FIELD_BYTES);
+    });
+
+    it("trims a budget rather than storing the whitespace", () => {
+      const result = parseBudget("  around 60k  ");
+
+      expect(result.success).toBe(true);
+      if (result.success && result.data.inquiryType === "Consulting") {
+        expect(result.data.estimatedBudget).toBe("around 60k");
+      }
+    });
+
+    /**
+     * Whitespace-only means "skipped", not "answered with spaces". `.trim()`
+     * runs before the `"" -> undefined` transform, so this collapses to the
+     * same absent value an untouched field produces — which is what keeps the
+     * key out of the multipart body entirely.
+     */
+    it("treats a whitespace-only budget as unanswered", () => {
+      const result = parseBudget("   ");
+
+      expect(result.success).toBe(true);
+      if (result.success && result.data.inquiryType === "Consulting") {
+        expect(result.data.estimatedBudget).toBeUndefined();
+      }
+    });
   });
 });
 

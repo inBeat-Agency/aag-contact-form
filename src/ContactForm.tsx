@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
-  BUDGETS,
   contactFormSchema,
   INQUIRY_TYPES,
   type ContactFormFields,
@@ -273,12 +272,17 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
         {showEngagement ? (
           <div className="aag-form-row">
             {phoneField}
-            <SelectField
+            {/*
+              Free text, not a dropdown. Every other TextField here carries an
+              `autoComplete` token; this one deliberately does not, because the
+              HTML autofill vocabulary has no term for a budget and guessing one
+              would have the browser offer the visitor an unrelated saved value.
+            */}
+            <TextField
               id="aag-form-estimatedBudget"
               label="Estimated Budget"
               optional
-              placeholder="Select an option"
-              options={BUDGETS}
+              placeholder="Enter your estimated budget"
               error={errors.estimatedBudget?.message}
               {...register("estimatedBudget")}
             />

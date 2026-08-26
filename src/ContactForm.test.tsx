@@ -310,6 +310,41 @@ describe("ContactForm — conditional field disclosure", () => {
     },
   );
 
+  /**
+   * Estimated Budget stopped being a dropdown of five brackets and became a
+   * free-text input, because a prospect who fits none of the brackets skips the
+   * field or picks the wrong one.
+   *
+   * Every OTHER Estimated Budget assertion in this file goes through
+   * `getByLabelText`, which resolves an `<input>` and a `<select>` identically —
+   * which is exactly why they all kept passing across this change and exactly
+   * why none of them prove it happened. This test asserts the ROLE instead:
+   * a text input exposes `textbox`, a single-select exposes `combobox`, so it
+   * goes red against the control the field used to be.
+   */
+  it.each(["Consulting", "Recruitment / Hiring"])(
+    "renders %s Estimated Budget as a free-text box, never a dropdown",
+    async (inquiryType) => {
+      renderForm();
+      const user = await selectInquiry(inquiryType);
+
+      const budget = screen.getByRole("textbox", { name: /Estimated Budget/ });
+      expect(
+        screen.queryByRole("combobox", { name: /Estimated Budget/ }),
+      ).not.toBeInTheDocument();
+      expect(budget).toHaveAttribute(
+        "placeholder",
+        "Enter your estimated budget",
+      );
+
+      // A `<select>` cannot be typed into at all, so this is the same claim
+      // made behaviourally: an arbitrary answer the old option list did not
+      // contain has to survive being entered.
+      await user.type(budget, "around 60k, flexible");
+      expect(budget).toHaveValue("around 60k, flexible");
+    },
+  );
+
   it("renders the lone Submit Resume phone full-width, outside the two-column row", async () => {
     renderForm();
     await selectInquiry("Submit Resume");
@@ -461,9 +496,9 @@ describe("ContactForm — Submit Resume submission", () => {
     // Fill the engagement-only fields, then switch away from that flow.
     await user.type(screen.getByLabelText("Title"), "Head of Talent");
     await user.type(screen.getByLabelText("Company"), "Acme Inc.");
-    await user.selectOptions(
+    await user.type(
       screen.getByLabelText(/Estimated Budget/),
-      "$50K – $150K",
+      "around 60k, flexible",
     );
 
     await user.selectOptions(
