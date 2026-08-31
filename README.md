@@ -270,6 +270,90 @@ single field. Leaving it alone also keeps the request CORS-safelisted, so no
 preflight `OPTIONS` ever fires. `src/submit.test.ts` guards this explicitly, and
 it is the single most breakable line in the transport.
 
+### Resume delivery email
+
+When a submission carries a validated resume, the Worker also **mails that file
+to staff as an attachment** — the original bytes, under the original file name,
+never converted to PDF.
+
+| | |
+|---|---|
+| Provider | [Resend](https://resend.com) REST API, `POST https://api.resend.com/emails` |
+| From | `AAG Website <resumes@forms.alphaapexgroup.com>` |
+| To | `hello@alphaapexgroup.com` |
+| Secret | `RESEND_API_KEY` — a **Worker secret**, never a var |
+| Body | Plain text. No HTML part, and no links at all |
+
+The point is that staff stop needing the credential-gated `/resume` link in
+their daily flow. That link is **not** going away: it remains the archive and
+the fallback, and nothing below changes it.
+
+```text
+widget ──multipart──> Worker ──JSON──> Zapier      (delivers the lead)
+                        │
+                        ├─ resume file ──> R2      (the archive)
+                        └─ resume file ──> Resend  (the notification)
+```
+
+**This email is a notification, not the delivery contract.** By the time it is
+attempted the CV is in R2 and the lead is in Zapier — the submission has already
+succeeded. So:
+
+- **It is sent *after* the Zapier forward, never before.** A failed forward
+  answers 502 and the candidate submits again; mailing first would put a fresh
+  copy of the same CV in the inbox on every retry.
+- **It is awaited, then discarded.** A Resend outage, a rejected key or an
+  unverified sender domain answers the candidate `200` exactly as a healthy
+  submission does. Turning it into a 502 would tell a candidate their
+  application failed when it did not — and this widget's answer to a failure is
+  the candidate submitting again, which buys duplicate leads and a false failure
+  report in exchange for a notification staff can also get from the `resumeUrl`
+  already in the lead.
+- **Only `inquiryType: "Submit Resume"` triggers it** — not merely "a file
+  arrived". `/submit` is public and a multipart body is trivially hand-written,
+  so anyone can post a General Question carrying a PDF. On a file-only rule that
+  would put a stranger's attachment into a staff inbox under a category nobody
+  expects one from. The other three inquiry types never contact Resend whatever
+  their body contains, and work unchanged on a deploy with no Resend
+  configuration at all.
+  This gates the **email only**: a file attached to a non-resume inquiry is
+  still validated, stored and reported through `resumeUrl` / `resumeFileName`,
+  exactly as before. Refusing it would throw away a real lead from someone who
+  attached something to the wrong form, and the payload link is the only way
+  anyone would ever learn the file was there.
+
+**`RESEND_API_KEY` is deliberately not a mandatory binding.** The hook URL,
+shared secret and erasure salt are checked before anything else because a
+missing one means a lead nobody receives. This one does not deliver anything, so
+listing it there would refuse every submission — including the three that have
+no resume — during the window between the code deploy and `wrangler secret put`.
+
+The one thing that *is* recorded is a single word:
+
+```json
+{"resumeEmail":"delivered"}
+```
+
+`delivered` · `rejected` (Resend answered and refused) · `errored` (the attempt
+threw) · `unconfigured` (no key on a deploy that just took a resume). That is
+the complete set, and it is deliberately all that escapes: **the message being
+mailed is a CV**, so nothing logs the API key, the candidate, the file name, the
+recipient, the response body or the endpoint. `unconfigured` is a value rather
+than silence on purpose — a secret nobody set would otherwise mean "this feature
+is quietly off, forever", which is the same shape as the provisioning mistake
+this Worker exists to catch.
+
+Two implementation details worth not undoing:
+
+- **Redirects are never followed** (`redirect: "manual"`), the same control the
+  Zapier forward uses and for a stronger reason: a custom `Authorization` header
+  is not stripped on a cross-origin hop, so a followed redirect would hand the
+  API key and the CV to whatever the `Location` names.
+- **No links in the body, including the resume URL.** Resend rewrites links when
+  click tracking is enabled on a domain — a dashboard setting this code cannot
+  read — and routing a candidate's gated CV URL through a tracking redirector is
+  not a trade worth making for a fallback the Zapier record already carries.
+
 ### Rate limiting
 
 Both public routes carry a per-client request budget, enforced by Cloudflare's
@@ -391,6 +475,11 @@ Ordered. Every intermediate state is safe; running these out of order is not.
 3. Deploy the Worker and set its secrets (hook URL, shared secret, erasure salt).
    All three are mandatory — a missing one fails the request loudly rather than
    dropping the lead quietly.
+   Set `RESEND_API_KEY` here too, but note it is **not** in that mandatory set:
+   `/submit` works with or without it, and until it is set every resume
+   submission logs `{"resumeEmail":"unconfigured"}` while still storing the CV
+   and delivering the lead. See
+   [Resume delivery email](#resume-delivery-email).
 4. Create the Access application on the resume hostname, then set `RESUME_HOST`.
    It ships blank on purpose, so `/resume` serves nothing until someone does.
 5. Run both deploy probes and require a positive signature from each:
@@ -525,6 +614,7 @@ src/
 worker/
   src/payload.ts       # pure multipart -> Zapier JSON transform (no React, no zod)
   src/payload.test.ts  # contract test, driven by the widget's real buildFormData()
+  src/resume-email.ts  # Resend REST call that mails the resume as an attachment
   fixtures/*.json      # four golden payloads, one per inquiry type (the artifact)
 scripts/
   send-zapier-samples.ts  # manual fixture replay against the Catch Hook

@@ -45,6 +45,7 @@ import {
   withinRateLimit,
   type RateLimiter,
 } from "./rate-limit";
+import { sendResumeEmail, type ResumeEmailOutcome } from "./resume-email";
 // Shared with `scripts/erase-candidate.ts` on purpose. The tool that honours a
 // deletion request finds objects by recomputing this hash, so a second copy of
 // it would be a deletion that silently matches nothing. See ./subject-hash.
@@ -78,6 +79,26 @@ export interface Env {
   ZAPIER_HOOK_URL: string;
   ZAPIER_SHARED_SECRET: string;
   ERASURE_SALT: string;
+  /**
+   * Resend API key, used to mail a validated resume to staff as an attachment.
+   * A WORKER SECRET, never a var: it authorises sending mail as a verified AAG
+   * domain.
+   *
+   * OPTIONAL ON PURPOSE, AND DELIBERATELY ABSENT FROM {@link MANDATORY_BINDINGS}.
+   *
+   * That check refuses the whole submission when a binding is missing, which is
+   * right for the two bindings that DELIVER the lead and wrong for this one. The
+   * email is a notification on top of a journey that already succeeded (see
+   * `./resume-email`), so a missing key must cost the notification and never the
+   * lead. Listing it as mandatory would also make every General Question — an
+   * inquiry type that has no resume and never contacts Resend — fail on a deploy
+   * where this secret is unset, and would refuse every submission arriving in
+   * the window between the code deploy and `wrangler secret put`.
+   *
+   * A resume submission on an unconfigured deploy is still LOUD: it logs
+   * `unconfigured` rather than quietly sending nothing.
+   */
+  RESEND_API_KEY?: string;
 }
 
 /**
@@ -522,6 +543,30 @@ async function forwardToZapier(
 }
 
 /**
+ * The record that a resume email was attempted, and how it ended.
+ *
+ * THE ONLY THING THAT ESCAPES THE EMAIL PATH, and it is one word from a closed
+ * enum. This is the sole signal that these emails are or are not arriving —
+ * nothing else in the system observes Resend — so it has to exist, and it has to
+ * be safe enough to emit on every single resume submission.
+ *
+ * WHAT IS NOT HERE IS THE POINT. No API key, no candidate, no file name, no
+ * response body, no request body, no recipient, no URL, no status code. The
+ * message being mailed IS a CV, so anything richer than a verdict would copy
+ * candidate PII into a log line that outlives the submission. The value cannot
+ * carry any of it either: {@link ResumeEmailOutcome} is fixed text chosen in
+ * `./resume-email`, never anything the remote end said.
+ *
+ * It is a SECOND line rather than a key on the request line, deliberately. That
+ * line's key set is an exclusive allowlist asserted on every response this
+ * Worker emits, and widening it for a field that is meaningless on the other 99%
+ * of requests would weaken the guard for all of them.
+ */
+function auditResumeEmail(outcome: ResumeEmailOutcome): void {
+  console.log({ resumeEmail: outcome });
+}
+
+/**
  * Handle a public form submission.
  *
  * A body that cannot be parsed as multipart — including no body at all, which is
@@ -578,6 +623,7 @@ async function handleSubmit(request: Request, env: Env): Promise<Routed> {
   const invalidFields = validateFields(formData);
   if (invalidFields !== null) return fail(invalidFields, cors);
 
+  const inquiryType = readText(formData, "inquiryType");
   const resume = formData.get("resume");
   const file = resume instanceof File && resume.size > 0 ? resume : null;
 
@@ -587,7 +633,7 @@ async function handleSubmit(request: Request, env: Env): Promise<Routed> {
   if (file === null) {
     // Only the resume flow requires a file; the other inquiry types are
     // text-only and must keep working.
-    if (readText(formData, "inquiryType") === RESUME_INQUIRY_TYPE) {
+    if (inquiryType === RESUME_INQUIRY_TYPE) {
       return fail("INVALID_SUBMISSION", cors);
     }
   } else {
@@ -616,6 +662,58 @@ async function handleSubmit(request: Request, env: Env): Promise<Routed> {
   // The stored object is deliberately NOT deleted here. An orphaned file is an
   // accepted cost; answering 2xx while the lead is gone is not.
   if (!forwarded) return fail("FORWARD_FAILED", cors);
+
+  /**
+   * MAIL THE CV TO STAFF — LAST, AWAITED, AND UNABLE TO CHANGE THE ANSWER.
+   *
+   * TWO CONDITIONS, AND THE SECOND IS NOT REDUNDANT.
+   *
+   * The obvious rule — "mail it whenever a file arrived" — is wrong, because
+   * `/submit` is public and a multipart body is trivially hand-written. Nothing
+   * upstream refuses a General Question that happens to carry a valid PDF: it is
+   * validated, stored and forwarded exactly as it is today, because refusing it
+   * would throw away a real lead over an unexpected field. So `file !== null` is
+   * satisfied by any inquiry type a stranger chooses to attach a file to, and on
+   * that rule alone anyone could post an attachment of their choosing into a
+   * staff inbox under a category no recruiter is expecting one from.
+   *
+   * The DISCRIMINATOR is what makes this the resume flow, so it is what gates
+   * the email. The other three inquiry types never contact Resend — whatever
+   * their body contains — which is also why they keep working, unchanged, on a
+   * deploy that has no Resend configuration at all.
+   *
+   * This gates the EMAIL ONLY. Storage and the Zapier forward are deliberately
+   * left exactly as they were: a file attached to a General Question is still
+   * kept and still reported, because the lead is real and the `resumeUrl` in the
+   * payload is how anyone would ever find out it was there.
+   *
+   * AFTER THE FORWARD, NOT BEFORE, and that ordering is the whole reason a retry
+   * is safe. A failed forward answers 502 and the candidate submits again; if
+   * the email went first, every one of those retries would mail staff another
+   * copy of the same CV. Sending only once Zapier has accepted the lead means an
+   * email exists for exactly the submissions that succeeded.
+   *
+   * AWAITED, so the outcome is known and can be recorded, rather than dispatched
+   * into `waitUntil` where a failure is unobservable.
+   *
+   * AND THEN DISCARDED. The response below is byte-identical whatever happened
+   * here, because by this point the CV is in R2 and the lead is in Zapier: the
+   * submission has SUCCEEDED. Turning a Resend outage into a 502 would tell a
+   * candidate their application failed when it did not, and this widget's answer
+   * to a failure is the candidate submitting again — duplicate leads and a false
+   * failure report, bought in exchange for a notification staff can also get
+   * from the resume link that is already in the lead.
+   */
+  if (file !== null && inquiryType === RESUME_INQUIRY_TYPE) {
+    auditResumeEmail(
+      await sendResumeEmail(String(env.RESEND_API_KEY ?? ""), {
+        candidateName: `${readText(formData, "firstName")} ${readText(formData, "lastName")}`,
+        candidateEmail: readText(formData, "workEmail"),
+        submittedAt,
+        file,
+      }),
+    );
+  }
 
   return {
     response: new Response(

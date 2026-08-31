@@ -2125,12 +2125,20 @@ describe("logging never leaks a secret", () => {
    * The presence half. "No secret appeared in the logs" is trivially true of a
    * Worker that logs nothing at all, so this asserts the allowlisted line IS
    * emitted and carries exactly the permitted keys.
+   *
+   * THE BODY IS DELIBERATELY NOT A RESUME, and that is a change rather than an
+   * accident. A submission carrying a file also emits the resume-email delivery
+   * diagnostic (`{ resumeEmail }`), so a resume body here would make this test
+   * about TWO lines while its name promises one. The second line has its own
+   * block — "the resume email is diagnosed without naming anybody" — which pins
+   * the exact pair a resume submission emits, in order. Splitting them keeps
+   * each assertion able to fail for one reason.
    */
   it("emits one allowlisted log line per request", async () => {
     const calls = captureConsole();
     interceptZapier();
 
-    await postForm(resumeSubmission());
+    await postForm(completeSubmission("General Question"));
 
     expect(calls).toHaveLength(1);
     expectOnlyAllowlistedLines(calls);
@@ -2139,16 +2147,19 @@ describe("logging never leaks a secret", () => {
     expect(logged.status).toBe(200);
   });
 
+  /** Non-resume for the same reason as above: `calls[0]` must be the request
+   * line, and a resume submission puts the delivery diagnostic in front of it. */
   it("records the received Origin so a misconfigured allowlist is diagnosable", async () => {
     const calls = captureConsole();
     interceptZapier();
 
     await SELF.fetch(`${ORIGIN}/submit`, {
       method: "POST",
-      body: resumeSubmission(),
+      body: completeSubmission("General Question"),
       headers: { Origin: "https://wrong-origin.test" },
     });
 
+    expect(calls).toHaveLength(1);
     const logged = calls[0]!.args[0] as Record<string, unknown>;
     expect(logged.origin).toBe("https://wrong-origin.test");
   });
@@ -2346,6 +2357,790 @@ describe("logging never leaks a secret", () => {
       expect(output.toLowerCase()).not.toContain("authorization");
       expect(output.toLowerCase()).not.toContain("basic ");
     });
+  });
+});
+
+/**
+ * THE RESUME DELIVERY EMAIL.
+ *
+ * Staff asked for the CV to arrive in `hello@alphaapexgroup.com` as its original
+ * attachment, so they stop needing the credential-gated download link in their
+ * daily flow. The link is not going away — it is the archive, and the fallback.
+ *
+ * The property every test in this block exists to protect is that the EMAIL
+ * CANNOT COST A LEAD. By the time it is attempted the CV is in R2 and the lead
+ * is in Zapier: the submission has already succeeded, and nothing Resend does or
+ * fails to do may change the answer the candidate gets.
+ *
+ * `RESEND_API_KEY` is deliberately NOT in `vitest.worker.config.ts`. Binding it
+ * globally would make every one of the ~200 tests above attempt an outbound
+ * send, so the default environment in this file is an unconfigured one and each
+ * test here opts in with its own fake key. That also makes the unconfigured
+ * deploy — the state between the code deploy and `wrangler secret put` — the
+ * case the rest of the suite proves is harmless.
+ */
+const RESEND_ORIGIN = "https://api.resend.com";
+const RESEND_PATH = "/emails";
+
+/** A fake key. The secret-hygiene assertions below scan for this value. */
+const RESEND_API_KEY = "re_worker_test_key_5b3e18";
+
+/** The published contract, typed out by hand rather than imported. */
+const EXPECTED_RESUME_EMAIL_FROM =
+  "AAG Website <resumes@forms.alphaapexgroup.com>";
+const EXPECTED_RESUME_EMAIL_TO = "hello@alphaapexgroup.com";
+
+/** The complete, exclusive key set of the delivery diagnostic line. */
+const RESUME_EMAIL_LOG_KEYS = ["resumeEmail"];
+
+function envWithResend(overrides: Partial<Env> = {}): Env {
+  return { ...env, RESEND_API_KEY, ...overrides };
+}
+
+function interceptResend(status = 200, replyBody = '{"id":"re_123"}') {
+  const captured: CapturedForward = {};
+  fetchMock
+    .get(RESEND_ORIGIN)
+    .intercept({ path: RESEND_PATH, method: "POST" })
+    .reply(status, (options) => {
+      captured.body = options.body as string;
+      captured.headers = options.headers as Record<string, string>;
+      return replyBody;
+    });
+  return captured;
+}
+
+/** POST a submission through an environment that HAS a Resend key. */
+async function submitWithResend(
+  form: FormData,
+  overrides: Partial<Env> = {},
+): Promise<Response> {
+  const ctx = createExecutionContext();
+  const response = await worker.fetch(
+    new Request(`${ORIGIN}/submit`, { method: "POST", body: form }),
+    envWithResend(overrides),
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  return response;
+}
+
+type ResendPayload = {
+  from: string;
+  to: string[];
+  subject: string;
+  text: string;
+  attachments: { filename: string; content: string }[];
+};
+
+/** Decode base64 without the encoder the Worker runs. */
+function decodeAttachment(content: string): number[] {
+  return [...atob(content)].map((char) => char.charCodeAt(0));
+}
+
+describe("POST /submit - a validated resume is mailed to staff as an attachment", () => {
+  /**
+   * `vi.restoreAllMocks()` is here rather than only inline after each spy.
+   *
+   * An inline `fetchSpy.mockRestore()` is unreachable when an assertion above it
+   * throws, so a single red test would leave `globalThis.fetch` permanently
+   * replaced and take unrelated tests down with it — turning one honest failure
+   * into a cascade nobody can read. Cleanup has to run on the failing path too.
+   */
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fetchMock.assertNoPendingInterceptors();
+  });
+
+  /**
+   * THE PRESENCE OF A SUCCESS SIGNAL, FIRST. Every "does not send" and "does not
+   * break" assertion below is satisfied by an implementation that never sends
+   * anything at all, so the working path is pinned before any of them — endpoint,
+   * method, credential, content type, sender and recipient in one place.
+   *
+   * Each expected value is a hand-written literal. Rebuilding them from the
+   * module under test proves only that the code agrees with itself, which is the
+   * one property no test needs to establish — and it is exactly how a resume URL
+   * missing its `/resume` segment once shipped past a green suite in this repo.
+   */
+  it("posts the message to Resend with the fixed sender, recipient and credential", async () => {
+    interceptZapier();
+    const captured = interceptResend();
+
+    const response = await submitWithResend(resumeSubmission());
+
+    expect(response.status).toBe(200);
+    expect(headerValue(captured.headers, "authorization")).toBe(
+      `Bearer ${RESEND_API_KEY}`,
+    );
+    expect(headerValue(captured.headers, "content-type")).toContain(
+      "application/json",
+    );
+
+    const payload = JSON.parse(captured.body!) as ResendPayload;
+    expect(payload.from).toBe(EXPECTED_RESUME_EMAIL_FROM);
+    expect(payload.to).toEqual([EXPECTED_RESUME_EMAIL_TO]);
+  });
+
+  /**
+   * Two outbound calls, to two named URLs, in that order. The URLs are literals
+   * so a repointed endpoint cannot produce a matching repointed expectation, and
+   * the ORDER is asserted because it is load-bearing: mailing before the forward
+   * would send staff a fresh copy of the same CV on every retry of a failed
+   * submission.
+   */
+  it("contacts Zapier first and Resend second, and nothing else", async () => {
+    const seen: string[] = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        seen.push(String(input));
+        return new Response('{"status":"success"}', { status: 200 });
+      });
+
+    const response = await submitWithResend(resumeSubmission());
+    fetchSpy.mockRestore();
+
+    expect(response.status).toBe(200);
+    expect(seen).toEqual([
+      "https://hooks.test/catch/1/abcdef",
+      "https://api.resend.com/emails",
+    ]);
+  });
+
+  /**
+   * THE ORIGINAL BYTES, UNDER THE ORIGINAL NAME, FOR EVERY ACCEPTED FORMAT.
+   *
+   * AAG asked for the file they were sent, not a rendering of it, so the
+   * assertion decodes what actually went on the wire and compares it against the
+   * bytes that went in. A truncating, re-encoding or placeholder implementation
+   * still produces valid base64 with the right magic bytes and fails only here.
+   *
+   * The three rows are the three formats `worker/src/limits.ts` accepts, and
+   * they are the same containers the storage and download tests use, so "still
+   * supported" means the same thing on all three paths.
+   */
+  const ACCEPTED_FORMATS: [string, string, string, number[]][] = [
+    ["PDF", "Jane-Doe-CV.pdf", "application/pdf", PDF_MAGIC],
+    [
+      "DOCX",
+      "Jane-Doe-CV.docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ZIP_MAGIC,
+    ],
+    ["legacy DOC", "Jane-Doe-CV.doc", "application/msword", OLE2_MAGIC],
+  ];
+
+  it.each(ACCEPTED_FORMATS)(
+    "attaches a %s byte-for-byte under its original file name",
+    async (_label, name, type, magic) => {
+      interceptZapier();
+      const captured = interceptResend();
+
+      // Distinct trailing bytes, so a head-only or repeated-chunk encoding
+      // cannot pass by starting with the right signature.
+      const bytes = new Uint8Array(4096);
+      bytes.set(magic, 0);
+      for (let index = magic.length; index < bytes.length; index += 1) {
+        bytes[index] = (index * 31 + 7) % 256;
+      }
+      const file = new File([bytes], name, { type });
+
+      const response = await submitWithResend(resumeSubmission(file));
+
+      expect(response.status).toBe(200);
+      const payload = JSON.parse(captured.body!) as ResendPayload;
+      expect(payload.attachments).toHaveLength(1);
+      expect(payload.attachments[0]!.filename).toBe(name);
+      expect(decodeAttachment(payload.attachments[0]!.content)).toEqual([
+        ...bytes,
+      ]);
+    },
+  );
+
+  /**
+   * THE PUBLISHED CEILING, MAILED END TO END, INSIDE workerd.
+   *
+   * Every other attachment test here uses a few kilobytes, so none of them
+   * exercises what actually happens at the size the UI promises: 10485760 bytes
+   * becomes a 13981016-character base64 string, which is then copied again into
+   * the JSON body and again into the request. An encoder that works on 4KB can
+   * still blow the call stack or the isolate's memory budget on 10MB, and the
+   * candidate who finds that out is the one submitting the largest CV.
+   *
+   * IT GOES THROUGH `POST /submit`, NOT THROUGH THE ENCODER DIRECTLY. A helper
+   * called in isolation proves the helper works; it does not prove the Worker
+   * survives holding the multipart body, the R2 write, the Zapier payload and
+   * this attachment at the same time, which is the only situation that occurs in
+   * production. The pressure is the point, so the realistic path is the one
+   * under test.
+   *
+   * THE EXPECTED LENGTH IS A HAND-COMPUTED LITERAL, not `4 * ceil(n / 3)`.
+   * 10485760 bytes is 3495254 base64 groups (the last carrying a single byte
+   * plus `==`), so 3495254 * 4 = 13981016 characters. Writing the arithmetic as
+   * an expression here would re-derive the answer from the same reasoning the
+   * implementation uses; writing the number down means a truncated or doubled
+   * encoding has nowhere to hide.
+   *
+   * ONLY THE BOUNDARY BYTES ARE DECODED. Round-tripping all 10MB inside the test
+   * would cost more memory than the code under test and prove nothing the 4KB
+   * round-trip tests above have not already proved. The head and the tail are
+   * what a truncating, padding or chunk-dropping encoder gets wrong, and the
+   * length covers the middle.
+   */
+  it("mails a resume of exactly 10485760 bytes, the published ceiling", async () => {
+    // Typed out rather than imported from `limits`. This is the number in the
+    // UI copy: if the constant ever drifts from it, that is the drift worth
+    // failing on, and an imported expectation could not see it.
+    const TEN_MEBIBYTES = 10 * 1024 * 1024;
+    const EXPECTED_BASE64_LENGTH = 13981016;
+
+    const bytes = new Uint8Array(TEN_MEBIBYTES);
+    // A real PDF head, and a marker at the very last four bytes. A head-only
+    // encoder produces the right prefix; only the tail catches truncation.
+    bytes.set([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34], 0);
+    bytes.set([0xde, 0xad, 0xbe, 0xef], TEN_MEBIBYTES - 4);
+
+    // Slices are pulled out inside the mock and the body is never retained, so
+    // the test holds a few characters rather than a second copy of 14MB.
+    let encodedLength = -1;
+    let head = "";
+    let tail = "";
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        if (String(input).startsWith(RESEND_ORIGIN)) {
+          const body = String(init?.body ?? "");
+          const marker = '"content":"';
+          const start = body.indexOf(marker) + marker.length;
+          // Base64 contains no quote and no backslash, so the next quote is the
+          // end of the value — no 14MB JSON.parse required.
+          const end = body.indexOf('"', start);
+          encodedLength = end - start;
+          head = body.slice(start, start + 8);
+          tail = body.slice(end - 8, end);
+        }
+        return new Response('{"status":"success"}', { status: 200 });
+      });
+
+    const response = await submitWithResend(
+      resumeSubmission(
+        new File([bytes], "Jane-Doe-CV.pdf", { type: "application/pdf" }),
+      ),
+    );
+    fetchSpy.mockRestore();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(encodedLength).toBe(EXPECTED_BASE64_LENGTH);
+
+    // Eight base64 characters carry six bytes, decoded here with `atob` rather
+    // than the encoder the Worker ran.
+    expect([...atob(head)].map((char) => char.charCodeAt(0))).toEqual([
+      0x25, 0x50, 0x44, 0x46, 0x2d, 0x31,
+    ]);
+    // The final two groups: three bytes, then the single trailing byte plus
+    // `==`. Four bytes out, and they are the marker written above.
+    expect([...atob(tail)].map((char) => char.charCodeAt(0))).toEqual([
+      0xde, 0xad, 0xbe, 0xef,
+    ]);
+  });
+
+  /**
+   * The attachment and the stored object must be the SAME bytes, or the email
+   * and the archive disagree about what the candidate sent — and only one of
+   * them can be the CV that gets read.
+   */
+  it("mails exactly the bytes it stored in R2", async () => {
+    interceptZapier();
+    const captured = interceptResend();
+
+    const response = await submitWithResend(resumeSubmission());
+    expect(response.status).toBe(200);
+
+    const { key } = await storedObject();
+    const stored = await env.RESUMES.get(key);
+    const storedBytes = [...new Uint8Array(await stored!.arrayBuffer())];
+
+    const payload = JSON.parse(captured.body!) as ResendPayload;
+    expect(decodeAttachment(payload.attachments[0]!.content)).toEqual(
+      storedBytes,
+    );
+  });
+});
+
+describe("POST /submit - only a real resume ever reaches Resend", () => {
+  /**
+   * Deterministic teardown, on the failing path as well as the passing one.
+   *
+   * This block installs BOTH `fetch` spies and `captureConsole()` console spies.
+   * An assertion that throws before the inline `mockRestore()` would leave the
+   * console silently captured for every later test in the file, so the audit and
+   * secret-hygiene blocks would start asserting against output they never saw.
+   */
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fetchMock.assertNoPendingInterceptors();
+  });
+
+  /**
+   * W: THE OTHER THREE INQUIRY TYPES MUST NOT NOTICE THIS FEATURE EXISTS.
+   *
+   * They carry no file, so there is nothing to mail — and a General Question
+   * that started depending on Resend would make an unrelated third-party outage
+   * able to touch three quarters of this form's traffic.
+   *
+   * The key IS configured here, deliberately. Asserting "no send" on a deploy
+   * with no key proves nothing; the discriminating input is a fully configured
+   * Worker that still declines to send because there was no attachment.
+   */
+  it.each(["General Question", "Consulting", "Recruitment / Hiring"])(
+    "never contacts Resend for a %s submission, even with a key configured",
+    async (inquiryType) => {
+      const seen: string[] = [];
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input) => {
+          seen.push(String(input));
+          return new Response('{"status":"success"}', { status: 200 });
+        });
+
+      const response = await submitWithResend(completeSubmission(inquiryType));
+      fetchSpy.mockRestore();
+
+      expect(response.status).toBe(200);
+      expect(seen).toEqual(["https://hooks.test/catch/1/abcdef"]);
+    },
+  );
+
+  it("writes no delivery diagnostic for a submission that carried no file", async () => {
+    const calls = captureConsole();
+    interceptZapier();
+
+    const response = await submitWithResend(
+      completeSubmission("General Question"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(loggedKeySets(calls)).toEqual([ALLOWLISTED_LOG_KEYS]);
+  });
+
+  /** A complete non-resume submission that ALSO carries a real, valid resume. */
+  function nonResumeCarryingAFile(inquiryType: string): FormData {
+    const form = completeSubmission(inquiryType);
+    const file = validPdf();
+    form.append("resume", file, file.name);
+    return form;
+  }
+
+  /**
+   * THE DISCRIMINATING CASE, AND THE ONLY ONE THAT CAN TELL THE TWO RULES APART.
+   *
+   * "Mail it whenever a file arrived" and "mail it when the inquiry type is
+   * Submit Resume" agree on every submission the widget can produce — the form
+   * only offers the file input on that one type. They disagree here, and this is
+   * reachable: `/submit` is public by design and a multipart body is trivially
+   * hand-written, so anyone can post a General Question with an attachment.
+   *
+   * Nothing upstream refuses it, deliberately (see the storage assertions in the
+   * next test), so the file-only rule would let a stranger place an attachment
+   * of their choosing into a staff inbox under a category no recruiter expects
+   * one from. The key is configured here, so a "no send" result can only come
+   * from the discriminator.
+   */
+  it.each(["General Question", "Consulting", "Recruitment / Hiring"])(
+    "never contacts Resend for a %s that smuggles in a valid resume file",
+    async (inquiryType) => {
+      const calls = captureConsole();
+      const seen: string[] = [];
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input) => {
+          seen.push(String(input));
+          return new Response('{"status":"success"}', { status: 200 });
+        });
+
+      const response = await submitWithResend(
+        nonResumeCarryingAFile(inquiryType),
+      );
+      fetchSpy.mockRestore();
+
+      expect(response.status).toBe(200);
+      expect(seen).toEqual(["https://hooks.test/catch/1/abcdef"]);
+      // No attempt means no verdict: the diagnostic must be absent entirely
+      // rather than present as `unconfigured` or any other outcome.
+      expect(loggedKeySets(calls)).toEqual([ALLOWLISTED_LOG_KEYS]);
+    },
+  );
+
+  /**
+   * THE OTHER HALF, AND IT IS A DELIBERATE NON-CHANGE.
+   *
+   * Only the EMAIL is gated by the discriminator. The file attached to a General
+   * Question is still validated, still stored in R2 and still reported to Zapier
+   * through `resumeUrl` and `resumeFileName`, exactly as before this feature
+   * existed.
+   *
+   * Refusing it instead would have been the tempting "fix" and it is the wrong
+   * one: the submission is a real lead from a real person who attached something
+   * to the wrong form, and this project's defining failure is throwing those
+   * away silently. The `resumeUrl` in the payload is the only way anyone ever
+   * finds out the file was there at all.
+   */
+  it("still stores and reports a file attached to a non-resume inquiry", async () => {
+    const bodies: string[] = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) => {
+        bodies.push(String(init?.body ?? ""));
+        return new Response('{"status":"success"}', { status: 200 });
+      });
+
+    const response = await submitWithResend(
+      nonResumeCarryingAFile("General Question"),
+    );
+    fetchSpy.mockRestore();
+
+    expect(response.status).toBe(200);
+    const { key } = await storedObject();
+    expect(JSON.parse(bodies[0]!)).toMatchObject({
+      inquiryType: "General Question",
+      resumeUrl: EXPECTED_RESUME_URL_PREFIX + key,
+      resumeFileName: "Jane-Doe-CV.pdf",
+    });
+  });
+
+  /**
+   * ORDERING PROOF. Zapier is the authoritative delivery contract: a failed
+   * forward is a failed submission, the candidate is told so, and they submit
+   * again. Mailing before that decision would put a duplicate CV in staff's
+   * inbox for every retry.
+   *
+   * No Resend interceptor is registered, so `disableNetConnect()` would turn any
+   * outbound send into a throw — and the fetch spy records the URLs directly, so
+   * this is a positive record of what happened rather than an absence.
+   */
+  it("never contacts Resend when the Zapier forward fails", async () => {
+    const seen: string[] = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        seen.push(String(input));
+        return new Response("upstream exploded", { status: 500 });
+      });
+
+    const response = await submitWithResend(resumeSubmission());
+    fetchSpy.mockRestore();
+
+    expect(response.status).toBe(502);
+    await expect(errorCodeOf(response)).resolves.toBe("FORWARD_FAILED");
+    expect(seen).toEqual(["https://hooks.test/catch/1/abcdef"]);
+  });
+
+  /**
+   * The deploy-order state, and it must be completely harmless.
+   *
+   * Between the code deploy and `wrangler secret put` the Worker runs with no
+   * Resend key at all. `RESEND_API_KEY` is deliberately absent from the
+   * mandatory-binding check for exactly this reason: a submit endpoint that
+   * refused leads while a notification was being configured would silently eat
+   * every lead arriving in that window.
+   *
+   * `env` here is the file's default — no key — and no Resend interceptor is
+   * registered, so an attempted send would throw under `disableNetConnect()`
+   * and be recorded as `errored` instead of `unconfigured`.
+   */
+  it("delivers the submission and sends nothing when RESEND_API_KEY is unset", async () => {
+    const calls = captureConsole();
+    const captured = interceptZapier();
+
+    const response = await postForm(resumeSubmission());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(JSON.parse(captured.body ?? "{}")).toMatchObject({
+      inquiryType: "Submit Resume",
+    });
+    expect(loggedKeySets(calls)).toEqual([
+      RESUME_EMAIL_LOG_KEYS,
+      ALLOWLISTED_LOG_KEYS,
+    ]);
+    expect(calls[0]!.args[0]).toEqual({ resumeEmail: "unconfigured" });
+  });
+
+  it.each([
+    ["blank", ""],
+    ["whitespace only", "   \n\t "],
+  ])(
+    "treats a %s RESEND_API_KEY as unconfigured rather than sending anonymously",
+    async (_label, key) => {
+      const calls = captureConsole();
+      interceptZapier();
+
+      const response = await submitWithResend(resumeSubmission(), {
+        RESEND_API_KEY: key,
+      });
+
+      expect(response.status).toBe(200);
+      expect(calls[0]!.args[0]).toEqual({ resumeEmail: "unconfigured" });
+    },
+  );
+});
+
+describe("POST /submit - a failed email never fails a delivered submission", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fetchMock.assertNoPendingInterceptors();
+  });
+
+  /**
+   * THE WHOLE POINT OF THIS SLICE, DRIVEN ACROSS EVERY WAY RESEND CAN LET US
+   * DOWN.
+   *
+   * The CV is in R2 and the lead is in Zapier before any of this runs, so the
+   * submission has SUCCEEDED. Turning a Resend outage into a 502 would tell a
+   * candidate their application failed when it did not — and this widget's
+   * answer to a failure is the candidate submitting again, which converts one
+   * third-party hiccup into duplicate leads plus a false failure report.
+   *
+   * Each row asserts the FULL success signature, not merely "not 502": the
+   * status, our own `{ok:true}`, the resume URL, the stored object and the
+   * forwarded Zapier body all have to be exactly what a healthy submission
+   * produces.
+   */
+  const RESEND_FAILURES: [string, number, string, string][] = [
+    ["401 an invalid API key", 401, '{"message":"API key is invalid"}', "rejected"],
+    ["403 an unverified sender", 403, '{"message":"domain not verified"}', "rejected"],
+    ["422 a rejected attachment", 422, '{"message":"attachment too big"}', "rejected"],
+    ["429 a throttled sender", 429, '{"message":"rate limited"}', "rejected"],
+    ["500 an upstream fault", 500, "resend exploded", "rejected"],
+    ["503 an outage", 503, "unavailable", "rejected"],
+    ["302 a redirect", 302, "", "rejected"],
+  ];
+
+  it.each(RESEND_FAILURES)(
+    "still answers 200 with the lead delivered when Resend returns %s",
+    async (_label, status, replyBody, expectedOutcome) => {
+      const calls = captureConsole();
+      const zapier = interceptZapier();
+      interceptResend(status, replyBody);
+
+      const response = await submitWithResend(resumeSubmission());
+      const body = (await response.json()) as {
+        ok?: boolean;
+        resumeUrl?: string;
+      };
+      const { key } = await storedObject();
+
+      expect(response.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.resumeUrl).toBe(EXPECTED_RESUME_URL_PREFIX + key);
+      expect(JSON.parse(zapier.body ?? "{}")).toMatchObject({
+        inquiryType: "Submit Resume",
+        resumeUrl: EXPECTED_RESUME_URL_PREFIX + key,
+      });
+      expect(calls[0]!.args[0]).toEqual({ resumeEmail: expectedOutcome });
+    },
+  );
+
+  /**
+   * A REJECTED PROMISE, which is a different branch from a refusing response.
+   * A DNS failure, a TLS failure or a connection reset all arrive this way, and
+   * an unhandled one would escape as a 500 with a body no client can interpret —
+   * losing a lead that had already been delivered.
+   */
+  it("still answers 200 when the Resend call throws outright", async () => {
+    const calls = captureConsole();
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        if (String(input).startsWith(RESEND_ORIGIN)) {
+          throw new Error(
+            `connect ECONNREFUSED ${RESEND_API_KEY} jane.doe@example.com Jane-Doe-CV.pdf`,
+          );
+        }
+        return new Response('{"status":"success"}', { status: 200 });
+      });
+
+    const response = await submitWithResend(resumeSubmission());
+    fetchSpy.mockRestore();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(calls[0]!.args[0]).toEqual({ resumeEmail: "errored" });
+  });
+
+  /**
+   * The Basic Auth archive is the fallback this email sits on top of, so a
+   * failed send must leave it completely intact: the link the lead carries has
+   * to still resolve, and still be gated.
+   */
+  it("leaves the stored resume downloadable through the gated link", async () => {
+    interceptZapier();
+    interceptResend(500, "resend exploded");
+
+    const response = await submitWithResend(resumeSubmission());
+    const { resumeUrl: emitted } = (await response.json()) as {
+      resumeUrl?: string;
+    };
+
+    const download = await probeResume(emitted!, authed());
+    expect(download.status).toBe(200);
+    expect(download.bytes.slice(0, PDF_MAGIC.length)).toEqual(PDF_MAGIC);
+
+    const intercepted = await probeResume(emitted!);
+    expect(intercepted.status).toBe(401);
+  });
+});
+
+describe("POST /submit - the delivery diagnostic names an outcome and nothing else", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fetchMock.assertNoPendingInterceptors();
+  });
+
+  /**
+   * TWO LINES, IN THIS ORDER, WITH EXACTLY THESE KEY SETS.
+   *
+   * The diagnostic is written the moment the attempt resolves rather than
+   * assembled at the end, so a later failure cannot drop the record of a send
+   * that already happened — the same shape as the `/resume` audit line.
+   *
+   * It is a SECOND line rather than a key on the request line because that
+   * line's key set is an exclusive allowlist asserted on every response this
+   * Worker emits; widening it for a field meaningless on the other 99% of
+   * requests would weaken the guard for all of them.
+   */
+  it("emits the diagnostic and the request line, in that order", async () => {
+    const calls = captureConsole();
+    interceptZapier();
+    interceptResend();
+
+    const response = await submitWithResend(resumeSubmission());
+
+    expect(response.status).toBe(200);
+    expect(loggedKeySets(calls)).toEqual([
+      RESUME_EMAIL_LOG_KEYS,
+      ALLOWLISTED_LOG_KEYS,
+    ]);
+    expect(calls[0]!.args[0]).toEqual({ resumeEmail: "delivered" });
+  });
+
+  /**
+   * THE VALUE IS FROM A CLOSED ENUM, PROVED BY DRIVING EVERY PATH.
+   *
+   * A diagnostic that echoed a status code, a response body or a caught error
+   * would be a leak with a different value on every failure. Collecting all four
+   * outcomes and comparing them as an ordered list is what makes that mutation
+   * red: an implementation that reported anything richer cannot produce this
+   * exact list.
+   */
+  it("reports one of four fixed verdicts, whatever happened", async () => {
+    const calls = captureConsole();
+
+    interceptZapier();
+    interceptResend(200);
+    await submitWithResend(resumeSubmission());
+
+    interceptZapier();
+    interceptResend(401, '{"message":"API key is invalid"}');
+    await submitWithResend(resumeSubmission());
+
+    // NO INTERCEPTOR FOR THIS RUN. The spy replaces `fetch` outright, so an
+    // interceptor registered here would never be consumed — it would stay
+    // queued and be served to an unrelated later test, which is exactly how a
+    // captured body comes back empty in a test that looks correct.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        if (String(input).startsWith(RESEND_ORIGIN)) throw new Error("boom");
+        return new Response('{"status":"success"}', { status: 200 });
+      });
+    await submitWithResend(resumeSubmission());
+    fetchSpy.mockRestore();
+
+    interceptZapier();
+    await submitWithResend(resumeSubmission(), { RESEND_API_KEY: "" });
+
+    const verdicts = calls
+      .filter((call) => "resumeEmail" in (call.args[0] as object))
+      .map((call) => (call.args[0] as { resumeEmail: string }).resumeEmail);
+
+    expect(verdicts).toEqual([
+      "delivered",
+      "rejected",
+      "errored",
+      "unconfigured",
+    ]);
+  });
+
+  /**
+   * THE LEAK SCAN, ON THE ONE PATH THAT HANDLES A CV AND A CREDENTIAL AT ONCE.
+   *
+   * The message being mailed IS candidate PII, and the request carries a bearer
+   * token. A `console.error(err)` on the catch branch — or a diagnostic built
+   * out of the response body — would put the API key, the candidate's name and
+   * address, their file name and the endpoint into output that outlives the
+   * submission.
+   *
+   * `leakScanText` is used rather than `JSON.stringify` for the reason recorded
+   * on that helper: `JSON.stringify(new Error(...))` is `"{}"`, so a serializer
+   * that erases exactly the objects most likely to carry a secret would certify
+   * the leak instead of catching it.
+   */
+  it("leaks no API key, candidate or file detail while driving every outcome", async () => {
+    const calls = captureConsole();
+
+    interceptZapier();
+    interceptResend(200);
+    await submitWithResend(resumeSubmission());
+
+    interceptZapier();
+    interceptResend(
+      401,
+      `{"message":"invalid key ${RESEND_API_KEY} for jane.doe@example.com"}`,
+    );
+    await submitWithResend(resumeSubmission());
+
+    // No interceptor for this run: the spy replaces `fetch`, so one registered
+    // here would stay queued and poison a later test.
+    const poisoned = new Error(
+      `connect ECONNREFUSED api.resend.com ${RESEND_API_KEY} ` +
+        `jane.doe@example.com Jane-Doe-CV.pdf hello@alphaapexgroup.com`,
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        if (String(input).startsWith(RESEND_ORIGIN)) throw poisoned;
+        return new Response('{"status":"success"}', { status: 200 });
+      });
+    await submitWithResend(resumeSubmission());
+    fetchSpy.mockRestore();
+
+    // Presence first: the runs above really did produce output to scan.
+    expect(calls.length).toBeGreaterThanOrEqual(6);
+
+    const output = calls
+      .map((call) => call.args.map((arg) => leakScanText(arg)).join(" "))
+      .join("\n");
+
+    for (const forbidden of [
+      RESEND_API_KEY,
+      "Bearer ",
+      "jane.doe@example.com",
+      "Jane-Doe-CV.pdf",
+      "hello@alphaapexgroup.com",
+      "resumes@forms.alphaapexgroup.com",
+      "api.resend.com",
+      "ECONNREFUSED",
+      "invalid key",
+      "%PDF",
+    ]) {
+      expect(output).not.toContain(forbidden);
+    }
+    // ...and the diagnostic that IS emitted stays two words wide.
+    expect(output).toContain("resumeEmail");
   });
 });
 

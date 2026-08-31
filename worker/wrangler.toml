@@ -162,10 +162,45 @@ RESUME_HOST = ""
 #   ERASURE_SALT            HMAC key for the candidate erasure index
 #   RESUME_AUTH_USER        HTTP Basic username for GET /resume/<key>
 #   RESUME_AUTH_PASSWORD    HTTP Basic password for GET /resume/<key>
+#   RESEND_API_KEY          Resend key for the resume delivery email
 #
 # They are intentionally absent from this file - a var is readable from the
 # dashboard and is committed here in plaintext, and RESUME_AUTH_* authorises
 # reads of candidate PII. Tests inject fakes through vitest.worker.config.ts.
+#
+# THE RESUME EMAIL CONTRACT. Read this before deploying.
+#
+# When a submission carries a validated resume, the Worker mails that file - the
+# original bytes, under the original name - to hello@alphaapexgroup.com, sending
+# as "AAG Website <resumes@forms.alphaapexgroup.com>" through Resend's REST API.
+# Both addresses and the endpoint are source constants in
+# `worker/src/resume-email.ts`, because `forms.alphaapexgroup.com` is the
+# DNS-verified sending domain and a `from` outside it is refused by the API.
+#
+# RESEND_API_KEY IS DELIBERATELY NOT MANDATORY, and that is the opposite of the
+# three secrets above it. Those DELIVER the lead, so a missing one fails the
+# request loudly. This one only sends a notification on top of a submission that
+# has already succeeded - the CV is in R2 and the lead is in Zapier before the
+# email is attempted - so a missing key must cost the email and never the lead.
+#
+# Consequences, all intended:
+#
+#   - `POST /submit` behaves identically with or without it. The email is gated
+#     on the inquiry type being "Submit Resume", not merely on a file being
+#     present, so the other three types never contact Resend whatever their body
+#     contains - `/submit` is public, and a hand-written multipart body can
+#     attach a file to any of them.
+#   - An unset or blank key does NOT send anonymously. The attempt is refused
+#     before the request is built, and the Worker logs `{"resumeEmail":
+#     "unconfigured"}` - so a deploy nobody finished configuring is loud rather
+#     than a feature that is quietly off forever.
+#   - A Resend outage, a rejected key or an unverified domain answers the
+#     candidate 200 exactly as a healthy submission does, and logs `rejected` or
+#     `errored`. The R2 object and the gated /resume link are untouched and
+#     remain the archive and the fallback.
+#
+# Nothing about the email is logged beyond that one word: no key, no candidate,
+# no file name, no recipient, no response body. The message being mailed IS a CV.
 #
 # THE /resume FAIL-CLOSED CONTRACT. Read this before deploying.
 #
