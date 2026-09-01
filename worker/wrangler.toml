@@ -116,10 +116,17 @@ simple = { limit = 60, period = 60 }
 # two origins, because the runtime suite reads its own test binding and cannot.
 ALLOWED_ORIGINS = "https://www.alphaapexgroup.com,https://alpha-apex-group.webflow.io"
 
-# Base for the resume URL handed to Zapier. Set at deploy time to the resume
-# hostname. There is deliberately no source-level fallback: if this is missing
-# the Worker fails the request loudly instead of forwarding a lead whose CV link
-# points nowhere.
+# Base for the resume URL handed to Zapier. There is deliberately no
+# source-level fallback: if this is missing the Worker fails the request loudly
+# instead of forwarding a lead whose CV link points nowhere.
+#
+# COMMITTED HERE, NOT SET AT DEPLOY TIME, and that is a lesson paid for in
+# production: `wrangler deploy` replaces EVERY var with what this file says, so
+# a value provisioned through the dashboard or a one-off `--var` survives only
+# until the next routine deploy. That exact wipe happened on 2026-09-01 - one
+# deploy from this file's blank defaults and every resume submission answered
+# STORAGE_FAILED until the values below were restored. A public origin is not a
+# secret; the durable place for it is the file every deploy reads.
 #
 # ORIGIN ONLY - scheme and host, e.g. "https://resumes.example.com". Do NOT
 # append "/resume": the Worker owns that segment and reads it from the same
@@ -134,7 +141,7 @@ ALLOWED_ORIGINS = "https://www.alphaapexgroup.com,https://alpha-apex-group.webfl
 # rather than forwarded. (A blank RESUME_HOST is exempt - that is an
 # unconfigured deploy, not a contradiction, and failing there would trade a dead
 # link for a lost lead.)
-RESUME_URL_BASE = ""
+RESUME_URL_BASE = "https://aag-contact-form-worker.inbeat.workers.dev"
 
 # The ONE hostname `GET /resume/<key>` answers on.
 #
@@ -148,11 +155,12 @@ RESUME_URL_BASE = ""
 # PII route to anyone probing, and the difference between 401 and 404 would tell
 # a caller on the wrong host whether their credentials would have been accepted.
 #
-# BLANK ON PURPOSE, and blank means "serve no resume anywhere". The zone is still
-# undecided (design open questions), and an unconfigured deploy that streams PII
-# from every hostname is far worse than one whose download route is simply dead.
-# Set it at deploy time, together with the two secrets below.
-RESUME_HOST = ""
+# THE DECIDED HOST IS THE workers.dev NAME, and it is committed here for the
+# same reason as RESUME_URL_BASE above: a deploy-time value is wiped by the
+# next deploy from this file. Blank remains the meaningful off-switch - blank
+# means "serve no resume anywhere" - so if the resume route ever has to be
+# killed, empty this value rather than deleting the line.
+RESUME_HOST = "aag-contact-form-worker.inbeat.workers.dev"
 
 # ---------------------------------------------------------------------------
 # WORKER SECRETS - set with `wrangler secret put`, NEVER as vars, NEVER here.
