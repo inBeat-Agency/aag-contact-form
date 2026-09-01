@@ -183,6 +183,32 @@ describe("sendResumeEmail - the outbound request contract", () => {
   });
 
   /**
+   * THE DEADLINE POLICY. The submit handler AWAITS this call before answering
+   * the candidate, so a Resend request that never resolves would hang a
+   * submission whose CV is already stored and whose lead is already delivered.
+   * A test harness cannot make wall-clock time pass, so — exactly like the
+   * redirect test above — the observable is the policy on the outbound
+   * request: a timeout signal, armed but not yet fired.
+   */
+  it("gives the outbound request a deadline", async () => {
+    const outbound: RequestInit[] = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) => {
+        outbound.push(init ?? {});
+        return new Response('{"id":"re_123"}', { status: 200 });
+      });
+
+    const { file } = makeFile("cv.pdf", "application/pdf", PDF_MAGIC, 64);
+    await sendResumeEmail(API_KEY, message(file));
+    fetchSpy.mockRestore();
+
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(outbound[0]!.signal!.aborted).toBe(false);
+  });
+
+  /**
    * THE SENDER AND RECIPIENT ARE FIXED, AND NEITHER IS DERIVED FROM INPUT.
    *
    * `from` must sit inside the DNS-verified domain or Resend refuses the send;
@@ -443,6 +469,29 @@ describe("sendResumeEmail - every ending is a safe, fixed verdict", () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(() => Promise.reject(poisoned));
+
+    const { file } = makeFile("cv.pdf", "application/pdf", PDF_MAGIC, 64);
+    const outcome = await sendResumeEmail(API_KEY, message(file));
+    fetchSpy.mockRestore();
+
+    expect(outcome).toBe("errored");
+  });
+
+  /**
+   * THE EXPIRED DEADLINE, AS THE PLATFORM DELIVERS IT. When the timeout signal
+   * fires, `fetch` rejects with a `TimeoutError` DOMException rather than an
+   * `Error`. It must land on the same closed verdict as every other thrown
+   * failure — an unanswered request costs the notification, never the answer
+   * the caller is holding open.
+   */
+  it("reports errored when the attempt is cut off by its deadline", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(() =>
+        Promise.reject(
+          new DOMException("The operation timed out", "TimeoutError"),
+        ),
+      );
 
     const { file } = makeFile("cv.pdf", "application/pdf", PDF_MAGIC, 64);
     const outcome = await sendResumeEmail(API_KEY, message(file));

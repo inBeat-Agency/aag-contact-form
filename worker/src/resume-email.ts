@@ -176,11 +176,28 @@ function bodyText(
 }
 
 /**
+ * Application deadline for one send attempt, in milliseconds.
+ *
+ * The submit handler AWAITS this call before answering the candidate, so a
+ * Resend request that never resolves would hang a submission whose CV is
+ * already in R2 and whose lead is already in Zapier — the one thing this
+ * module exists to never do. `fetch` has no deadline of its own, so one is
+ * applied explicitly: on expiry the attempt rejects with a `TimeoutError`,
+ * the catch below collapses it to `errored`, and the candidate's response is
+ * exactly what a healthy submission produces.
+ */
+const RESUME_EMAIL_TIMEOUT_MS = 10_000;
+
+/**
  * Mail one validated resume, and report how it went.
  *
  * NEVER THROWS. See the notification contract at the top of this file: the
  * caller has already stored the CV and delivered the lead, so there is no
  * failure here worth failing that journey over.
+ *
+ * BOUNDED. The attempt carries an abort timeout ({@link RESUME_EMAIL_TIMEOUT_MS})
+ * because the caller awaits it before responding: an unanswered request must
+ * cost the notification, never the submission's answer.
  *
  * REDIRECTS ARE NEVER FOLLOWED, and that is a security control rather than a
  * preference — the same one `forwardToZapier` applies, for a stronger reason. A
@@ -217,6 +234,10 @@ export async function sendResumeEmail(
     const response = await fetch(RESEND_ENDPOINT, {
       method: "POST",
       redirect: "manual",
+      // BOUNDED, so a Resend request that never answers cannot hang the
+      // submission the caller is holding open. Expiry lands in the catch
+      // below as `errored`, like every other thrown failure.
+      signal: AbortSignal.timeout(RESUME_EMAIL_TIMEOUT_MS),
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
