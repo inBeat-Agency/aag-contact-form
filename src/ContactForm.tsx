@@ -198,7 +198,7 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
 
         <SelectField
           id="aag-form-inquiryType"
-          label="Inquiry type"
+          label="Inquiry Type"
           placeholder="Select an option"
           options={INQUIRY_TYPES}
           error={errors.inquiryType?.message}

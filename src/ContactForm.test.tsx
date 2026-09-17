@@ -38,7 +38,7 @@ function renderForm() {
 async function selectInquiry(label: string) {
   const user = userEvent.setup();
   await user.selectOptions(
-    screen.getByLabelText("Inquiry type"),
+    screen.getByLabelText("Inquiry Type"),
     label,
   );
   return user;
@@ -62,7 +62,7 @@ describe("ContactForm — initial render (placeholder preview)", () => {
   it("shows the inquiry select without a widget-owned header", () => {
     renderForm();
 
-    expect(screen.getByLabelText("Inquiry type")).toBeInTheDocument();
+    expect(screen.getByLabelText("Inquiry Type")).toBeInTheDocument();
     // The heading/subtitle copy intentionally lives in Webflow, not the widget.
     expect(screen.queryByText("Contact Us")).not.toBeInTheDocument();
     expect(
@@ -80,7 +80,7 @@ describe("ContactForm — initial render (placeholder preview)", () => {
   it("previews exactly the General Question field set while on the placeholder", () => {
     renderForm();
 
-    expect(screen.getByLabelText("Inquiry type")).toHaveValue("");
+    expect(screen.getByLabelText("Inquiry Type")).toHaveValue("");
 
     // Common fields (the General Question set) are previewed.
     expect(screen.getByLabelText("First Name")).toBeInTheDocument();
@@ -116,7 +116,7 @@ describe("ContactForm — initial render (placeholder preview)", () => {
     await user.click(screen.getByRole("button", { name: /submit/i }));
 
     // The error must land on the inquiry select itself, not float loose.
-    const inquirySelect = screen.getByLabelText("Inquiry type");
+    const inquirySelect = screen.getByLabelText("Inquiry Type");
     await waitFor(() =>
       expect(inquirySelect).toHaveAttribute("aria-invalid", "true"),
     );
@@ -148,7 +148,7 @@ describe("ContactForm — initial render (placeholder preview)", () => {
     );
 
     await user.selectOptions(
-      screen.getByLabelText("Inquiry type"),
+      screen.getByLabelText("Inquiry Type"),
       "Consulting",
     );
 
@@ -374,7 +374,7 @@ describe("ContactForm — field persistence on inquiry change", () => {
 
     // Switch to a type that does not show Title.
     await user.selectOptions(
-      screen.getByLabelText("Inquiry type"),
+      screen.getByLabelText("Inquiry Type"),
       "General Question",
     );
 
@@ -389,7 +389,7 @@ describe("ContactForm — field persistence on inquiry change", () => {
 
     // Reselecting Consulting shows Title cleared (reset, not preserved).
     await user.selectOptions(
-      screen.getByLabelText("Inquiry type"),
+      screen.getByLabelText("Inquiry Type"),
       "Consulting",
     );
     expect(screen.getByLabelText("Title")).toHaveValue("");
@@ -402,7 +402,7 @@ describe("ContactForm — validation", () => {
     await selectInquiry("Submit Resume");
 
     for (const label of [
-      "Inquiry type",
+      "Inquiry Type",
       "First Name",
       "Last Name",
       "Work Email",
@@ -502,7 +502,7 @@ describe("ContactForm — Submit Resume submission", () => {
     );
 
     await user.selectOptions(
-      screen.getByLabelText("Inquiry type"),
+      screen.getByLabelText("Inquiry Type"),
       "Submit Resume",
     );
 

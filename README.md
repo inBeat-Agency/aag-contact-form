@@ -44,7 +44,7 @@ injected at runtime, so embedding requires only one `<div>` and one `<script>`.
 > proves **nothing** about the gate — Miniflare cannot see Access.
 
 The form uses progressive disclosure in a single form (not a multi-step wizard).
-On the **Inquiry type** placeholder it previews the General Question field set
+On the **Inquiry Type** placeholder it previews the General Question field set
 so the widget never loads empty; choosing a type then reveals that type's
 fields. The preview is presentational only — the placeholder is not a valid
 value, so submitting without choosing a type fails and asks for one.
