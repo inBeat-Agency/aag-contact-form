@@ -1,7 +1,41 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  getDefaultNormalizer,
+  render,
+  screen as testingScreen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ContactForm } from "./ContactForm";
+
+// Label-text queries include aria-hidden text, unlike accessible-name queries.
+// Ignore only the decorative suffix here; marker and accessible-name assertions
+// below deliberately inspect the unmodified DOM.
+const normalizeFieldLabel = (text: string) =>
+  getDefaultNormalizer()(text).replace(/ \*$/, "");
+const screen = {
+  ...testingScreen,
+  getByLabelText: (
+    ...[text, options]: Parameters<typeof testingScreen.getByLabelText>
+  ) => testingScreen.getByLabelText(text, {
+    normalizer: normalizeFieldLabel,
+    ...options,
+  }),
+  queryByLabelText: (
+    ...[text, options]: Parameters<typeof testingScreen.queryByLabelText>
+  ) => testingScreen.queryByLabelText(text, {
+    normalizer: normalizeFieldLabel,
+    ...options,
+  }),
+  findByLabelText: (
+    ...[text, options, waitOptions]: Parameters<typeof testingScreen.findByLabelText>
+  ) => testingScreen.findByLabelText(
+    text,
+    { normalizer: normalizeFieldLabel, ...options },
+    waitOptions,
+  ),
+};
 
 // The component talks to the network only through the global `fetch`. We stub it
 // so no real request leaves the test and we can assert whether it was called.
@@ -160,6 +194,56 @@ describe("ContactForm — initial render (placeholder preview)", () => {
     expect(screen.getByLabelText("How can we help you?")).toHaveValue(
       "We need help with hiring.",
     );
+  });
+});
+
+describe("ContactForm — required field markers", () => {
+  it.each([
+    ["initial preview", "", [], []],
+    ["General Question", "General Question", [], []],
+    [
+      "Consulting", "Consulting",
+      ["Title", "Company"], ["Phone", "Estimated Budget"],
+    ],
+    [
+      "Recruitment / Hiring", "Recruitment / Hiring",
+      ["Title", "Company"], ["Phone", "Estimated Budget"],
+    ],
+    ["Submit Resume", "Submit Resume", ["Upload Resume"], ["Phone"]],
+  ] as const)("marks only required labels in %s", async (_, inquiryType, additionalRequired, optional) => {
+    const { container } = renderForm();
+    if (inquiryType) {
+      await userEvent.setup().selectOptions(
+        screen.getByRole("combobox", { name: "Inquiry Type" }),
+        inquiryType,
+      );
+    }
+
+    const required = [
+      "Inquiry Type", "First Name", "Last Name", "Work Email",
+      "How can we help you?", ...additionalRequired,
+    ];
+    const labels = [...container.querySelectorAll("label")];
+
+    for (const name of required) {
+      const label = labels.find((element) => element.textContent?.startsWith(name));
+      expect(label).toHaveTextContent(`${name} *`);
+      const marker = label?.querySelector('[aria-hidden="true"]');
+      expect(marker).toHaveTextContent("*");
+      expect(marker).toBeVisible();
+      const control = document.getElementById(label!.htmlFor);
+      expect(control).toBeRequired();
+      expect(control).toHaveAccessibleName(name);
+    }
+
+    for (const name of optional) {
+      const label = labels.find((element) => element.textContent?.startsWith(name));
+      expect(label).toHaveTextContent(`${name} (Optional)`);
+      expect(label).not.toHaveTextContent("*");
+      const control = document.getElementById(label!.htmlFor);
+      expect(control).not.toBeRequired();
+      expect(control).toHaveAccessibleName(`${name} (Optional)`);
+    }
   });
 });
 
@@ -334,7 +418,7 @@ describe("ContactForm — conditional field disclosure", () => {
       ).not.toBeInTheDocument();
       expect(budget).toHaveAttribute(
         "placeholder",
-        "Enter your estimated budget",
+        "$100,000",
       );
 
       // A `<select>` cannot be typed into at all, so this is the same claim

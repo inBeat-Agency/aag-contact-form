@@ -35,7 +35,11 @@ export function FieldWrapper({
     <div className="aag-form-field form_field-wrapper">
       <label className="aag-form-label form_label" htmlFor={id}>
         {label}
-        {optional ? <span className="aag-form-optional"> (Optional)</span> : null}
+        {optional ? (
+          <span className="aag-form-optional"> (Optional)</span>
+        ) : (
+          <span aria-hidden="true"> *</span>
+        )}
       </label>
       {children}
       {error ? (
