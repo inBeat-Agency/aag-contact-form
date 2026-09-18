@@ -282,7 +282,7 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
               id="aag-form-estimatedBudget"
               label="Estimated Budget"
               optional
-              placeholder="Enter your estimated budget"
+              placeholder="$100,000"
               error={errors.estimatedBudget?.message}
               {...register("estimatedBudget")}
             />
