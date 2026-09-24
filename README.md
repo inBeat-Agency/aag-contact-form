@@ -600,6 +600,35 @@ past hour, so the oldest of the four will not appear. That is fine: every
 fixture carries the complete key set, so any single one teaches Zapier the whole
 schema.
 
+## Analytics
+
+The widget submits via `fetch`, so GTM's built-in Form Submission trigger never
+fires. After the Worker confirms a lead (`{ ok: true }`), `src/analytics.ts`
+pushes one event to `window.dataLayer`. Nothing is pushed on validation
+failure, on an error outcome, or on the honeypot fake success.
+
+```js
+{
+  event: "aag_form_submit",
+  inquiry_type: "General Question" | "Consulting" | "Recruitment / Hiring" | "Submit Resume",
+  form_source: "<data-source>", // omitted when the embed sets no data-source
+  interest: "talent",           // from ?interest=…, trimmed, max 64 chars; omitted when absent
+}
+```
+
+No PII is ever pushed. The event name and keys are a **public contract with
+GTM** — renaming any of them breaks tracking unless GTM changes in the same
+release.
+
+Expected GTM setup (container `GTM-59KZSPX7`):
+
+1. Data Layer Variables for `inquiry_type`, `form_source`, `interest`.
+2. Trigger: Custom Event, event name `aag_form_submit`.
+3. Tag: GA4 Event (e.g. `generate_lead`) on that trigger, sending the three
+   variables as event parameters.
+4. In GA4, register `inquiry_type`, `form_source` and `interest` as
+   event-scoped custom dimensions, and mark `generate_lead` as a key event.
+
 ## Project structure
 
 ```

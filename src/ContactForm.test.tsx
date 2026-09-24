@@ -835,3 +835,80 @@ describe("ContactForm — honeypot", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("ContactForm — analytics (GTM dataLayer)", () => {
+  function submitEvents() {
+    return (window.dataLayer ?? []).filter(
+      (entry) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        (entry as { event?: unknown }).event === "aag_form_submit",
+    ) as Record<string, unknown>[];
+  }
+
+  beforeEach(() => {
+    delete window.dataLayer;
+  });
+
+  afterEach(() => {
+    delete window.dataLayer;
+  });
+
+  it("pushes exactly one submit event on a real Worker success", async () => {
+    fetchMock.mockResolvedValue(workerSuccess());
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Thanks!");
+    const events = submitEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: "aag_form_submit",
+      inquiry_type: "General Question",
+      form_source: "unit-test",
+    });
+  });
+
+  it("does not push when the submission fails", async () => {
+    fetchMock.mockResolvedValue(
+      new Response("<!doctype html><h1>Success</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    );
+    const user = await fillMinimalInquiry();
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Something went wrong/i,
+    );
+    expect(submitEvents()).toHaveLength(0);
+  });
+
+  it("does not push on the honeypot fake-success path", async () => {
+    const user = await fillMinimalInquiry();
+    const honeypot = document.querySelector<HTMLInputElement>(
+      'input[name="website"]',
+    );
+    await user.type(honeypot as HTMLInputElement, "spam-bot-value");
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Thanks!");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(submitEvents()).toHaveLength(0);
+  });
+
+  it("does not push when validation fails", async () => {
+    renderForm();
+    const user = await selectInquiry("General Question");
+
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+
+    expect(await screen.findByText("First name is required")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(submitEvents()).toHaveLength(0);
+  });
+});

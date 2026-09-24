@@ -14,6 +14,7 @@ import {
 } from "./fields";
 import { buildFormData, submitContactForm } from "./submit";
 import { ALLOWED_RESUME_EXTENSIONS } from "./schema";
+import { trackSubmission } from "./analytics";
 
 export interface ContactFormProps {
   /** Endpoint the multipart payload is POSTed to (from `data-endpoint`). */
@@ -91,6 +92,11 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
       endpoint,
       buildFormData(values, source),
     );
+    // Fire here, not from an effect: StrictMode double-invokes effects, and
+    // only a Worker-confirmed lead counts (never the honeypot fake success).
+    if (result.outcome === "success") {
+      trackSubmission({ inquiryType: values.inquiryType, source });
+    }
     setStatus(result.outcome);
   }
 
