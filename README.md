@@ -4,44 +4,27 @@ A standalone, embeddable **Contact Us** form for the Alpha Apex Group Webflow
 site. It is a single React app compiled to one self-mounting IIFE bundle. CSS is
 injected at runtime, so embedding requires only one `<div>` and one `<script>`.
 
-> ## ⚠️ The widget now talks to the Worker, and the Worker is not deployed yet
+> ## Deployment state (verified 2026-10-26 against production)
 >
-> The interim transport is gone. The widget POSTs **multipart to the Cloudflare
-> Worker**, which stores the resume and forwards flat JSON to Zapier. Nothing in
-> this repo posts to the Zapier hook any more.
->
-> **The endpoint has not been repointed.** `data-endpoint` in the Webflow embed
-> still points at the Zapier Catch Hook, and Zapier does not answer `ok: true`,
-> so **every submission currently renders the error panel**. That is the correct
-> behaviour, not a bug: the widget refuses to claim success it cannot verify.
-> The form is not delivering leads until the cutover below runs.
->
-> **Cutover — the one change that turns it back on.** Deploy the Worker, then set
-> the embed attribute to the Worker's submit hostname:
->
-> ```html
-> data-endpoint="https://<submit-host>/submit"
-> ```
->
-> It is a runtime attribute in the Webflow embed, so this needs no code deploy
-> and no rebuild. See [Cutover checklist](#cutover-checklist) for the full order.
->
-> **Not done yet, and required before real candidates use this:**
+> The widget POSTs **multipart to the Cloudflare Worker**, which stores the
+> resume and forwards flat JSON to Zapier. Nothing in this repo posts to a
+> Zapier hook directly.
 >
 > | Gate | State |
 > | --- | --- |
-> | Worker deployed + R2 bucket provisioned | ❌ not done |
-> | `data-endpoint` repointed at the Worker | ❌ not done — do NOT apply before the Worker is live |
-> | **Cloudflare Access on the resume hostname** | ❌ **not configured** |
-> | Old Zapier Catch Hook revoked | ❌ not done — the burned URL still accepts POSTs |
+> | Worker deployed (`aag-contact-form-worker.inbeat.workers.dev`) | ✅ probe P1 answers `400 {"error":"INVALID_SUBMISSION"}` |
+> | `data-endpoint` repointed at the Worker | ✅ on `www.alphaapexgroup.com` and `alpha-apex-group.webflow.io` |
+> | `ALLOWED_ORIGINS` covers both live origins | ✅ both receive `access-control-allow-origin` |
+> | Resume downloads gated | ✅ HTTP Basic Auth in the Worker (`RESUME_AUTH_USER` / `RESUME_AUTH_PASSWORD`, see `worker/wrangler.toml`); `/resume` answers `401` with `WWW-Authenticate: Basic` |
+> | Old Zapier Catch Hook revoked | ❓ not verifiable from the repo — confirm in Zapier |
+> | `RESEND_API_KEY` set | ❓ not verifiable from outside — check the Worker's secrets |
 >
-> **The Access gate is the one that matters most.** `GET /resume/<key>` has a
-> host lock in code, but **no authorization**: authorization is edge-side and
-> deliberately not implemented in the Worker. Until the Access application exists
-> on the resume hostname and probe P2 passes, that hostname must not be pointed
-> at this Worker with a non-blank `RESUME_HOST`, or stored CVs are world-readable
-> to anyone holding a key. A green local test suite proves the route works and
-> proves **nothing** about the gate — Miniflare cannot see Access.
+> **The Worker is deployed by hand; CI deploys only Cloudflare Pages.**
+> `.github/workflows/deploy.yml` publishes `dist/` (widget + tracker) on every
+> push to `main`, but never the Worker. When a change needs both, **deploy the
+> Worker first** (`npx wrangler deploy --config worker/wrangler.toml` from the
+> branch), then merge: a widget that sends fields the live Worker does not
+> accept yet loses every lead until the Worker catches up.
 
 The form uses progressive disclosure in a single form (not a multi-step wizard).
 On the **Inquiry Type** placeholder it previews the General Question field set
@@ -505,11 +488,16 @@ apart silently.
 
 Ordered. Every intermediate state is safe; running these out of order is not.
 
+**Status (2026-10-26):** steps 1–7 are done in production (see the
+deployment state table at the top). Step 8 is unverified. Steps 9–10 are the
+attribution rollout.
+
 1. Provision the R2 bucket and confirm it is **private** — `wrangler r2 bucket
    dev-url get` reports disabled **and** `wrangler r2 bucket domain list` is
    empty. Both. Either alone still serves CVs.
-2. Audit the zone for a covering Cloudflare Access application before creating
-   any new one. A wildcard app breaks the hostname-isolation assumption.
+2. ~~Audit the zone for a covering Cloudflare Access application.~~ Superseded:
+   resume downloads are authorized by HTTP Basic Auth inside the Worker
+   (`3c63340`), not by Cloudflare Access.
 3. Deploy the Worker and set its secrets (hook URL, shared secret, erasure salt).
    All three are mandatory — a missing one fails the request loudly rather than
    dropping the lead quietly.
@@ -518,20 +506,20 @@ Ordered. Every intermediate state is safe; running these out of order is not.
    submission logs `{"resumeEmail":"unconfigured"}` while still storing the CV
    and delivering the lead. See
    [Resume delivery email](#resume-delivery-email).
-4. Create the Access application on the resume hostname, then set `RESUME_HOST`.
-   It ships blank on purpose, so `/resume` serves nothing until someone does.
+4. Set the `RESUME_AUTH_USER` and `RESUME_AUTH_PASSWORD` secrets, then
+   `RESUME_HOST` (committed in `worker/wrangler.toml`). Missing credentials fail
+   closed: `/resume` serves nothing.
 5. Run both deploy probes and require a positive signature from each:
    - **P1** — an empty `POST /submit` must answer `400` with
      `{"error":"INVALID_SUBMISSION"}`. Only our Worker can emit that string, so
-     no Access challenge can forge a pass.
-   - **P2** — an unauthenticated `GET /resume/<sentinel-uuid>` must return a
-     response containing `cloudflareaccess.com`. A `404` here means the gate is
-     missing, not that the key is unknown.
+     nothing in front of the Worker can forge a pass.
+   - **P2** — an unauthenticated `GET /resume/<sentinel-uuid>` on `RESUME_HOST`
+     must answer `401` with `WWW-Authenticate: Basic`. A `404` there means the
+     host lock does not match, and a `200` means the gate is open.
 6. Confirm `ALLOWED_ORIGINS` **contains** `document.location.origin` read from
    the live mounted page — on **every** origin the widget is mounted on, not
-   just the one you happen to be looking at. During the migration window that is
-   both of them: `alphaapexgroup.com` still serves Squarespace, so the widget
-   lives on the Webflow staging origin and on production simultaneously.
+   just the one you happen to be looking at. Today that is both of them: the
+   production Webflow site and the Webflow staging origin.
 
    It is a comma-separated allowlist, and the Worker echoes back the caller's
    own origin when it is on the list. An origin that is missing still gets its
