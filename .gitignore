@@ -8,3 +8,5 @@ dist
 # Local agent configuration and work notes
 .pi/
 odd/
+.codegraph/
+.playwright-mcp/
