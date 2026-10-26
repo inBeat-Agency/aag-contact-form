@@ -11,7 +11,7 @@
  * omitted, so the Zapier field picker sees a stable shape.
  */
 
-import { MAX_ATTRIBUTION_URL_LENGTH, type Touch } from "./source";
+import { capAttributionValue, type Touch } from "./source";
 import type { AttributionState } from "./touches";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -60,7 +60,7 @@ export function attributionFields(
   return [
     ...touchFields("ft", state?.first),
     ...touchFields("lt", state?.last),
-    ["conversion_page", conversionPage.slice(0, MAX_ATTRIBUTION_URL_LENGTH)],
+    ["conversion_page", capAttributionValue(conversionPage)],
     ["days_to_convert", daysToConvert(state?.first, submittedAt)],
   ];
 }

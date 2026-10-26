@@ -7,21 +7,27 @@
  * - New session: no session marker in `sessionStorage`. The marker is per tab
  *   and dies with the browser session, which is what a returning visitor looks
  *   like days later.
- * - New campaign click: the URL carries a UTM or an ad click ID, even inside an
- *   open session — a second ad click is a new last touch.
+ * - New campaign click: the URL carries a UTM or an ad click ID and differs
+ *   from the URL this session last captured, even inside an open session — a
+ *   second ad click is a new last touch, a reload of the same one is not.
+ *
+ * The marker's value is the URL this session last captured as a landing.
  *
  * Any other page view is internal browsing and changes nothing. That is what
  * keeps a UTM landing's values intact through the pages a visitor reads before
  * reaching the contact form.
  *
- * Both the site-wide tracker and the widget call this. Calling it twice on one
- * page view is harmless: the first call opens the session, so the second one
- * is internal browsing unless the URL is a campaign click, in which case it
- * rewrites last touch with identical values.
+ * Both the site-wide tracker and the widget call this on the same page view.
+ * The second call finds its own URL in the marker, so it changes nothing and a
+ * first-visit conversion keeps first and last touch identical (S4).
+ *
+ * CONSENT (S7): this is the one place that writes, and it asks `canStore()`
+ * before every write — the stored state and the session marker alike. When it
+ * refuses, nothing is written and this landing is still returned in memory.
  */
 
 import { resolveTouch, type Landing } from "./source";
-import { readState, writeState } from "./storage";
+import { canStore, readState, writeState } from "./storage";
 import { applyLanding, type AttributionState } from "./touches";
 
 export const SESSION_STORAGE_KEY = "aag_attribution_session";
@@ -55,15 +61,20 @@ function isCampaignClick(url: string) {
   }
 }
 
-/** Open the session; reports whether it was already open. Unreadable storage counts as a new session. */
-function openSession(session: Storage | null) {
-  if (!session) return false;
+/** The URL this session last captured, or `null` for a new session. Unreadable storage counts as a new session. */
+function readSessionLanding(session: Storage | null) {
   try {
-    const wasOpen = session.getItem(SESSION_STORAGE_KEY) !== null;
-    session.setItem(SESSION_STORAGE_KEY, "1");
-    return wasOpen;
+    return session?.getItem(SESSION_STORAGE_KEY) ?? null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+function writeSessionLanding(session: Storage | null, url: string) {
+  try {
+    session?.setItem(SESSION_STORAGE_KEY, url);
+  } catch {
+    // Storage full or blocked: the next page view counts as a new session.
   }
 }
 
@@ -74,11 +85,16 @@ function openSession(session: Storage | null) {
 export function captureLanding(environment: CaptureEnvironment): AttributionState {
   const { local, session, ...landing } = environment;
   const stored = readState(local, landing.now);
-  const sessionWasOpen = openSession(session);
+  const sessionLanding = readSessionLanding(session);
+  const isNewLanding =
+    sessionLanding === null || (isCampaignClick(landing.url) && landing.url !== sessionLanding);
 
-  if (stored && sessionWasOpen && !isCampaignClick(landing.url)) return stored;
+  if (stored && !isNewLanding) return stored;
 
   const state = applyLanding(stored, resolveTouch(landing));
-  writeState(local, state, landing.now);
+  if (canStore()) {
+    writeState(local, state, landing.now);
+    writeSessionLanding(session, landing.url);
+  }
   return state;
 }

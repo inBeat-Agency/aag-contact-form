@@ -22,6 +22,7 @@
  * such as `https://evil.example/?google.com` is just a referral.
  */
 
+import { MAX_TEXT_FIELD_CHARS } from "../../worker/src/limits";
 import { channelFor, DIRECT_MEDIUM, DIRECT_SOURCE, type Channel } from "./channel";
 
 export type Touch = {
@@ -122,13 +123,13 @@ const AI_ASSISTANT_DOMAINS = [
   ["claude.ai", "claude"],
 ] as const;
 
-/** Longest stored UTM, click ID or source value. */
-export const MAX_ATTRIBUTION_VALUE_LENGTH = 500;
-/** Longest stored URL (landing page, referrer). */
-export const MAX_ATTRIBUTION_URL_LENGTH = 2000;
-
-function cap(value: string, max: number) {
-  return value.slice(0, max);
+/**
+ * Every stored value is kept as received and cut only at the Worker's per-field
+ * limit: past it the Worker refuses the whole lead, so a cut value is the
+ * lesser loss.
+ */
+export function capAttributionValue(value: string) {
+  return value.slice(0, MAX_TEXT_FIELD_CHARS);
 }
 
 function parseUrl(value: string) {
@@ -160,8 +161,14 @@ function isIgnoredReferrer(host: string, currentHost: string) {
   );
 }
 
+/** The parameter exactly as received, capped only at the Worker's field limit. */
 function readParam(params: URLSearchParams, key: string) {
-  return cap(params.get(key)?.trim() ?? "", MAX_ATTRIBUTION_VALUE_LENGTH);
+  return capAttributionValue(params.get(key) ?? "");
+}
+
+/** Whitespace-only values are kept, but never decide which rule applies. */
+function isPresent(value: string) {
+  return value.trim() !== "";
 }
 
 type SourceFields = Pick<Touch, "source" | "medium" | "campaign" | "term" | "content" | "referrer">;
@@ -173,7 +180,7 @@ function fromReferrer(referrer: URL | null): SourceFields {
   }
 
   const host = referrer.hostname.toLowerCase();
-  const href = cap(referrer.href, MAX_ATTRIBUTION_URL_LENGTH);
+  const href = capAttributionValue(referrer.href);
   const ruleMatches = [
     [lookupSearchEngine(host), "organic"],
     [lookupDomain(host, SOCIAL_DOMAINS), "social"],
@@ -183,7 +190,7 @@ function fromReferrer(referrer: URL | null): SourceFields {
     if (source) return { ...empty, source, medium, referrer: href };
   }
 
-  const domain = cap(host.replace(/^www\./, ""), MAX_ATTRIBUTION_VALUE_LENGTH);
+  const domain = capAttributionValue(host.replace(/^www\./, ""));
   return { ...empty, source: domain, medium: "referral", referrer: href };
 }
 
@@ -199,11 +206,11 @@ export function resolveTouch({ url, referrer, now }: Landing): Touch {
     term: readParam(params, UTM_PARAMS.term),
     content: readParam(params, UTM_PARAMS.content),
   };
-  const hasUtm = Object.values(utm).some((value) => value !== "");
+  const hasUtm = Object.values(utm).some(isPresent);
 
   const clickMatch = CLICK_ID_SOURCES.map(
     ([param, source]) => [readParam(params, param), source] as const,
-  ).find(([value]) => value !== "");
+  ).find(([value]) => isPresent(value));
   const clickId = clickMatch?.[0] ?? "";
 
   const referrerUrl = parseUrl(referrer);
@@ -211,9 +218,7 @@ export function resolveTouch({ url, referrer, now }: Landing): Touch {
     referrerUrl && !isIgnoredReferrer(referrerUrl.hostname.toLowerCase(), currentHost)
       ? referrerUrl
       : null;
-  const referrerHref = externalReferrer
-    ? cap(externalReferrer.href, MAX_ATTRIBUTION_URL_LENGTH)
-    : "";
+  const referrerHref = externalReferrer ? capAttributionValue(externalReferrer.href) : "";
 
   const fields: SourceFields = hasUtm
     ? { ...utm, referrer: referrerHref }
@@ -232,7 +237,7 @@ export function resolveTouch({ url, referrer, now }: Landing): Touch {
     channel: channelFor(fields.source, fields.medium),
     ...fields,
     clickId,
-    landingPage: cap(url, MAX_ATTRIBUTION_URL_LENGTH),
+    landingPage: capAttributionValue(url),
     date: now.toISOString(),
   };
 }

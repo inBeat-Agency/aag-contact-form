@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_TEXT_FIELD_CHARS } from "../../worker/src/limits";
 import { resolveTouch } from "./source";
 
 const NOW = new Date("2026-10-26T12:00:00.000Z");
@@ -188,10 +189,53 @@ describe("resolveTouch — recorded context", () => {
     expect(touchFor(url)).toMatchObject({ landingPage: url, date: NOW.toISOString() });
   });
 
-  it("caps every value so one hostile URL cannot exceed the Worker's field limit", () => {
-    const touch = touchFor(`${PAGE}?utm_campaign=${"a".repeat(5000)}`);
+  it("keeps UTM and click ID values exactly as received, surrounding spaces included", () => {
+    const touch = touchFor(`${PAGE}?utm_source=%20Google%20&gclid=%20g-1%20`);
 
-    expect(touch.campaign).toHaveLength(500);
-    expect(touch.landingPage.length).toBeLessThanOrEqual(2000);
+    expect(touch).toMatchObject({ source: " Google ", clickId: " g-1 " });
+  });
+
+  it("does not count a whitespace-only parameter as present", () => {
+    const touch = touchFor(`${PAGE}?utm_source=%20&gclid=%20`, "https://www.google.com/");
+
+    expect(touch).toMatchObject({ source: "google", medium: "organic", clickId: "" });
+  });
+
+  it("preserves a long campaign, landing URL and referrer below the Worker's field limit", () => {
+    const campaign = "c".repeat(501);
+    const url = `${PAGE}?utm_campaign=${campaign}&q=${"x".repeat(2100)}`;
+    const referrer = `https://industry-news.com/?q=${"r".repeat(2100)}`;
+    const touch = touchFor(url, referrer);
+
+    expect(touch.campaign).toBe(campaign);
+    expect(touch.landingPage).toBe(url);
+    expect(touch.referrer).toBe(referrer);
+  });
+
+  it("cuts a value only at the Worker's per-field limit, so the lead is never refused", () => {
+    const tooLong = MAX_TEXT_FIELD_CHARS + 100;
+    const touch = touchFor(
+      `${PAGE}?utm_campaign=${"a".repeat(tooLong)}&gclid=${"g".repeat(tooLong)}`,
+      `https://industry-news.com/?q=${"r".repeat(tooLong)}`,
+    );
+
+    expect(touch.campaign).toHaveLength(MAX_TEXT_FIELD_CHARS);
+    expect(touch.clickId).toHaveLength(MAX_TEXT_FIELD_CHARS);
+    expect(touch.landingPage).toHaveLength(MAX_TEXT_FIELD_CHARS);
+    expect(touch.referrer).toHaveLength(MAX_TEXT_FIELD_CHARS);
+  });
+});
+
+describe("resolveTouch — whitespace-only values", () => {
+  it("preserves whitespace-only content when other UTMs identify the source", () => {
+    const touch = touchFor(`${PAGE}?utm_source=google&utm_medium=cpc&utm_content=%20`);
+
+    expect(touch).toMatchObject({ source: "google", medium: "cpc", content: " " });
+  });
+
+  it("does not let whitespace-only UTMs or click IDs override the referrer", () => {
+    const touch = touchFor(`${PAGE}?utm_source=%20&gclid=%20`, "https://www.google.com/");
+
+    expect(touch).toMatchObject({ source: "google", medium: "organic", channel: "Organic Search" });
   });
 });

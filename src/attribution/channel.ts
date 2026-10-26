@@ -25,17 +25,18 @@ export type Channel = (typeof CHANNELS)[number];
 export const DIRECT_SOURCE = "(direct)";
 export const DIRECT_MEDIUM = "(none)";
 
-const CHANNEL_BY_MEDIUM: Readonly<Record<string, Channel>> = {
-  cpc: "Paid Search",
-  ppc: "Paid Search",
-  paid_search: "Paid Search",
-  paid_social: "Paid Social",
-  organic: "Organic Search",
-  social: "Organic Social",
-  ai: "AI Assistant",
-  email: "Email",
-  referral: "Referral",
-};
+/** A `Map`, not an object literal: a medium such as `constructor` must not find an inherited key. */
+const CHANNEL_BY_MEDIUM: ReadonlyMap<string, Channel> = new Map([
+  ["cpc", "Paid Search"],
+  ["ppc", "Paid Search"],
+  ["paid_search", "Paid Search"],
+  ["paid_social", "Paid Social"],
+  ["organic", "Organic Search"],
+  ["social", "Organic Social"],
+  ["ai", "AI Assistant"],
+  ["email", "Email"],
+  ["referral", "Referral"],
+]);
 
 /**
  * Medium rules are checked before the direct rule, in the brief's table order.
@@ -43,7 +44,7 @@ const CHANNEL_BY_MEDIUM: Readonly<Record<string, Channel>> = {
  * campaign link typed them, and `CPC` is still a paid click.
  */
 export function channelFor(source: string, medium: string): Channel {
-  const byMedium = CHANNEL_BY_MEDIUM[medium.trim().toLowerCase()];
+  const byMedium = CHANNEL_BY_MEDIUM.get(medium.trim().toLowerCase());
   if (byMedium) return byMedium;
   if (source === DIRECT_SOURCE) return "Direct";
   return "Other";

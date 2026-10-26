@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ATTRIBUTION_FIELD_KEYS, attributionFields } from "./fields";
-import { resolveTouch, MAX_ATTRIBUTION_URL_LENGTH } from "./source";
+import { MAX_TEXT_FIELD_CHARS } from "../../worker/src/limits";
+import { resolveTouch } from "./source";
 import type { AttributionState } from "./touches";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -132,10 +133,17 @@ describe("attributionFields", () => {
     expect(fields.days_to_convert).toBe("");
   });
 
-  it("caps conversion_page at the stored URL limit", () => {
-    const longPage = `${CONVERSION_PAGE}?q=${"x".repeat(MAX_ATTRIBUTION_URL_LENGTH)}`;
+  it("keeps a long conversion_page whole below the Worker's field limit", () => {
+    const longPage = `${CONVERSION_PAGE}?q=${"x".repeat(2100)}`;
     const fields = toRecord(attributionFields(null, FIRST_DATE, longPage));
 
-    expect(fields.conversion_page).toBe(longPage.slice(0, MAX_ATTRIBUTION_URL_LENGTH));
+    expect(fields.conversion_page).toBe(longPage);
+  });
+
+  it("cuts conversion_page only at the Worker's per-field limit", () => {
+    const longPage = `${CONVERSION_PAGE}?q=${"x".repeat(MAX_TEXT_FIELD_CHARS)}`;
+    const fields = toRecord(attributionFields(null, FIRST_DATE, longPage));
+
+    expect(fields.conversion_page).toBe(longPage.slice(0, MAX_TEXT_FIELD_CHARS));
   });
 });

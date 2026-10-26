@@ -99,6 +99,23 @@ describe("captureLanding — S1 what counts as a landing", () => {
     expect(state?.last).toMatchObject({ channel: "Email", source: "newsletter" });
   });
 
+  it("captures one campaign page view once, even when tracker and widget both run", () => {
+    const first = visit("/?gclid=a", "", T0);
+    const second = visit("/?gclid=a", "", new Date(T0.getTime() + 1000));
+
+    expect(second).toEqual(first);
+    expect(second.last).toEqual(second.first);
+    expect(second.last.date).toBe(T0.toISOString());
+  });
+
+  it("does not treat a reload of the same campaign URL as a new click", () => {
+    visit("/?gclid=a", "", T0);
+    visit("/services", `${SITE}/?gclid=a`, at(0.01));
+    const state = visit("/?gclid=a", "", at(0.02));
+
+    expect(state.last.date).toBe(T0.toISOString());
+  });
+
   it("does not re-evaluate an external referrer once the session is open", () => {
     visit("/", "https://www.google.com/", T0);
     const state = visit("/about", "https://www.bing.com/", at(0.1));

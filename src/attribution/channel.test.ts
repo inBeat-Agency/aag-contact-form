@@ -23,6 +23,13 @@ describe("channelFor — S3 channel grouping", () => {
     expect(channelFor("Google", "CPC")).toBe("Paid Search");
   });
 
+  it.each(["constructor", "__proto__", "toString"])(
+    "groups the inherited object key %s as a medium under Other",
+    (medium) => {
+      expect(channelFor("partner", medium)).toBe("Other");
+    },
+  );
+
   it("lets a medium rule win over the direct source rule", () => {
     expect(channelFor("(direct)", "email")).toBe("Email");
   });

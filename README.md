@@ -651,8 +651,10 @@ interleaved, so the 15 keys above keep their positions in the live Zap). Each
 | `days_to_convert` | Whole days from `ft_date` to submission, floored, never negative; `""` without a first touch |
 
 The attribution keys are `""` when nothing is known — storage blocked and no
-capture, or a body from a cached widget that predates attribution. URLs are
-capped at 2000 characters and other values at 500.
+capture, or a body from a cached widget that predates attribution. Values are
+sent as received (UTMs keep their spacing and case) and cut only at the
+Worker's per-field limit, `MAX_TEXT_FIELD_CHARS` in `worker/src/limits.ts`, so
+an oversized URL can never get the whole lead refused.
 
 The Worker accepts up to `MAX_TEXT_FIELD_COUNT` = **40** text fields per
 submission (`worker/src/limits.ts`); the widget sends up to 35 (13 form fields
@@ -744,11 +746,14 @@ A page view is a landing when either:
 
 - **it starts a new session** — no `aag_attribution_session` marker in
   `sessionStorage`. That marker is per tab and dies with the browser session,
-  which is what a visitor returning days later looks like; or
+  which is what a visitor returning days later looks like; its value is the URL
+  the session last captured as a landing; or
 - **its URL carries a UTM or an ad click ID** (`utm_source`, `utm_medium`,
   `utm_campaign`, `utm_term`, `utm_content`, `gclid`, `gbraid`, `wbraid`,
-  `msclkid`, `fbclid`, `li_fat_id`, `ttclid`), even inside an open session — a
-  second ad click is a new last touch.
+  `msclkid`, `fbclid`, `li_fat_id`, `ttclid`) and differs from that marker URL,
+  even inside an open session — a second ad click is a new last touch, while a
+  reload of the same campaign URL, or the tracker and the widget both capturing
+  one page view, is not.
 
 Any other page view is internal browsing and changes nothing. That is what
 keeps a UTM landing's values intact through the pages a visitor reads before
@@ -831,8 +836,12 @@ never to an error.
 
 ### Consent
 
-Every write goes through one function, `canStore()` in
-`src/attribution/storage.ts`, which today always returns `true`.
+One function decides consent, `canStore()` in `src/attribution/storage.ts`,
+which today always returns `true`. `captureLanding` (`src/attribution/capture.ts`)
+is the only writer and asks it before every write — the stored state in
+`localStorage` and the `aag_attribution_session` marker alike. When it refuses,
+nothing is written and the landing is still used in memory for a submission on
+the same page.
 
 **The site has no consent manager (CMP).** The live page loads only GTM
 `GTM-59KZSPX7`, the container has no CMP template or consent-default tag, and it

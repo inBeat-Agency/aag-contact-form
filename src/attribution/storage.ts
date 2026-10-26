@@ -6,16 +6,21 @@
  * cookie's expiry is refreshed on every write. Nothing here is sent anywhere:
  * the values only leave the browser inside a contact form submission.
  *
- * CONSENT (S7): every write goes through {@link canStore}. The site has no
- * consent manager today — GTM already fires GA4 and the Ads conversion linker
+ * CONSENT (S7): {@link canStore} is the one consent decision. `captureLanding`
+ * (`capture.ts`) asks it before every write — this state and the session
+ * marker — so {@link writeState} is a plain writer. The site has no consent
+ * manager today — GTM already fires GA4 and the Ads conversion linker
  * unconditionally — so it allows every write. When a consent manager is added,
- * hook it here and nowhere else.
+ * hook it into `canStore` and nowhere else.
  *
  * The stored value is untrusted input: another script, an older bundle or the
  * visitor can change it. It is validated field by field, and anything that
- * does not match is treated as no history rather than repaired.
+ * does not match — including a value longer than the Worker's per-field limit,
+ * which would get the whole lead refused — is treated as no history rather
+ * than repaired.
  */
 
+import { MAX_TEXT_FIELD_CHARS } from "../../worker/src/limits";
 import { CHANNELS, type Channel } from "./channel";
 import type { Touch } from "./source";
 import type { AttributionState } from "./touches";
@@ -38,6 +43,10 @@ function isChannel(value: unknown): value is Channel {
   return CHANNELS.some((channel) => channel === value);
 }
 
+function isStoredText(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_TEXT_FIELD_CHARS;
+}
+
 function parseTouch(value: unknown): Touch | null {
   if (!isRecord(value)) return null;
 
@@ -45,15 +54,15 @@ function parseTouch(value: unknown): Touch | null {
     value;
   if (
     !isChannel(channel) ||
-    typeof source !== "string" ||
-    typeof medium !== "string" ||
-    typeof campaign !== "string" ||
-    typeof term !== "string" ||
-    typeof content !== "string" ||
-    typeof clickId !== "string" ||
-    typeof landingPage !== "string" ||
-    typeof referrer !== "string" ||
-    typeof date !== "string" ||
+    !isStoredText(source) ||
+    !isStoredText(medium) ||
+    !isStoredText(campaign) ||
+    !isStoredText(term) ||
+    !isStoredText(content) ||
+    !isStoredText(clickId) ||
+    !isStoredText(landingPage) ||
+    !isStoredText(referrer) ||
+    !isStoredText(date) ||
     Number.isNaN(Date.parse(date))
   ) {
     return null;
@@ -94,9 +103,12 @@ export function readState(storage: Storage | null, now: Date): AttributionState 
   return first && last ? { first, last } : null;
 }
 
-/** Persist the state for another 90 days. Never throws; quota or privacy errors drop the write. */
+/**
+ * Persist the state for another 90 days. Never throws; quota or privacy errors
+ * drop the write. Does not ask {@link canStore}: its caller does.
+ */
 export function writeState(storage: Storage | null, state: AttributionState, now: Date) {
-  if (!storage || !canStore()) return;
+  if (!storage) return;
 
   try {
     storage.setItem(
