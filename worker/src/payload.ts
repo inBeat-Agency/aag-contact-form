@@ -16,6 +16,37 @@
  */
 
 /**
+ * The 22 attribution hidden fields (first touch, last touch, conversion), in
+ * wire order. Appended to {@link ZAPIER_PAYLOAD_KEYS}.
+ */
+export const ATTRIBUTION_PAYLOAD_KEYS = [
+  "ft_channel",
+  "ft_source",
+  "ft_medium",
+  "ft_campaign",
+  "ft_term",
+  "ft_content",
+  "ft_click_id",
+  "ft_landing_page",
+  "ft_referrer",
+  "ft_date",
+  "lt_channel",
+  "lt_source",
+  "lt_medium",
+  "lt_campaign",
+  "lt_term",
+  "lt_content",
+  "lt_click_id",
+  "lt_landing_page",
+  "lt_referrer",
+  "lt_date",
+  "conversion_page",
+  "days_to_convert",
+] as const;
+
+export type AttributionPayloadKey = (typeof ATTRIBUTION_PAYLOAD_KEYS)[number];
+
+/**
  * The wire contract, in the order Zapier receives it.
  *
  * | Key                | Populated for                                        |
@@ -35,11 +66,22 @@
  * | `resumeFileName`   | Submit Resume                                        |
  * | `source`           | when the embed sets `data-source`                    |
  * | `submittedAt`      | always                                               |
+ * | `ft_*` (10 keys)   | always; empty when the visitor's source is unknown   |
+ * |                    | or the embed predates attribution                    |
+ * | `lt_*` (10 keys)   | always; empty when the visitor's source is unknown   |
+ * |                    | or the embed predates attribution                    |
+ * | `conversion_page`  | always; empty when the embed predates attribution    |
+ * | `days_to_convert`  | always; empty when the visitor's source is unknown   |
+ * |                    | or the embed predates attribution                    |
  *
  * `companySize` and `expectedTimeline` were retired from the form because they
  * hurt conversion, but they REMAIN on the wire as constant empty strings. See
  * the note on {@link ZapierPayload}: removing a key the client's live Zap has
  * already mapped is what breaks it. Retired is not the same as removed.
+ *
+ * The first-touch (`ft_*`) and last-touch (`lt_*`) attribution keys are
+ * APPENDED after `submittedAt`, never interleaved: the existing fifteen keep
+ * their positions so the live Zap mapping is untouched.
  */
 export const ZAPIER_PAYLOAD_KEYS = [
   "inquiryType",
@@ -57,6 +99,7 @@ export const ZAPIER_PAYLOAD_KEYS = [
   "resumeFileName",
   "source",
   "submittedAt",
+  ...ATTRIBUTION_PAYLOAD_KEYS,
 ] as const;
 
 export type ZapierPayloadKey = (typeof ZAPIER_PAYLOAD_KEYS)[number];
@@ -127,5 +170,39 @@ export function toZapierPayload(
     resumeFileName: options.resumeFileName ?? "",
     source: readText(formData, "source"),
     submittedAt: options.submittedAt,
+    ...readAttribution(formData),
+  };
+}
+
+/**
+ * The 22 attribution fields, in contract order. A body from a cached
+ * pre-attribution widget carries none of them, and each becomes "".
+ */
+function readAttribution(
+  formData: FormData,
+): { [K in AttributionPayloadKey]: string } {
+  return {
+    ft_channel: readText(formData, "ft_channel"),
+    ft_source: readText(formData, "ft_source"),
+    ft_medium: readText(formData, "ft_medium"),
+    ft_campaign: readText(formData, "ft_campaign"),
+    ft_term: readText(formData, "ft_term"),
+    ft_content: readText(formData, "ft_content"),
+    ft_click_id: readText(formData, "ft_click_id"),
+    ft_landing_page: readText(formData, "ft_landing_page"),
+    ft_referrer: readText(formData, "ft_referrer"),
+    ft_date: readText(formData, "ft_date"),
+    lt_channel: readText(formData, "lt_channel"),
+    lt_source: readText(formData, "lt_source"),
+    lt_medium: readText(formData, "lt_medium"),
+    lt_campaign: readText(formData, "lt_campaign"),
+    lt_term: readText(formData, "lt_term"),
+    lt_content: readText(formData, "lt_content"),
+    lt_click_id: readText(formData, "lt_click_id"),
+    lt_landing_page: readText(formData, "lt_landing_page"),
+    lt_referrer: readText(formData, "lt_referrer"),
+    lt_date: readText(formData, "lt_date"),
+    conversion_page: readText(formData, "conversion_page"),
+    days_to_convert: readText(formData, "days_to_convert"),
   };
 }

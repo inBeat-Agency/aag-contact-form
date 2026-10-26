@@ -505,7 +505,7 @@ async function storeResume(
  *
  * The shared secret travels as a HEADER, not a body key. The Zap filters on it
  * so a stranger who scraped the old public hook URL can no longer inject leads,
- * and keeping it out of the body leaves the 15-key contract frozen.
+ * and keeping it out of the body leaves the wire contract to the form's own keys.
  *
  * REDIRECTS ARE NEVER FOLLOWED, and that is a security control rather than a
  * preference. `fetch` follows them by default, so an expired or repointed hook
