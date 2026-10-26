@@ -6,6 +6,13 @@ import { describe, expect, it } from "vitest";
 
 const PROJECT_ROOT = process.cwd();
 const BUNDLE_PATH = resolve(PROJECT_ROOT, "dist/aag-contact-form.js");
+const TRACKER_PATH = resolve(PROJECT_ROOT, "dist/aag-attribution.js");
+
+/**
+ * The tracker loads in the `<head>` of every page on the site, so it must stay
+ * a few kilobytes: no React, no zod, nothing the form needs.
+ */
+const MAX_TRACKER_BYTES = 8 * 1024;
 const WIDGET_SRC = resolve(PROJECT_ROOT, "src");
 
 /**
@@ -137,6 +144,35 @@ describe("production IIFE bundle", () => {
       const mount = dom.window.document.getElementById("aag-contact-form");
       expect(mount).toHaveAttribute("data-aag-mounted", "true");
       expect(mount?.querySelector("form")).not.toBeNull();
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  it("ships a small site-wide tracker that records the landing on load", () => {
+    execFileSync("npm", ["run", "build"], {
+      cwd: PROJECT_ROOT,
+      env: { ...process.env, NODE_ENV: "production" },
+      stdio: "pipe",
+    });
+
+    const tracker = readFileSync(TRACKER_PATH, "utf8");
+    expect(Buffer.byteLength(tracker)).toBeLessThan(MAX_TRACKER_BYTES);
+    expect(tracker).not.toMatch(/\bprocess\b/);
+    expect(tracker).not.toContain("react");
+
+    const dom = new JSDOM("<!doctype html><title>Insights</title>", {
+      runScripts: "dangerously",
+      url: "https://www.alphaapexgroup.com/insights",
+      referrer: "https://www.linkedin.com/feed/",
+    });
+
+    try {
+      expect(() => dom.window.eval(tracker)).not.toThrow();
+
+      const stored = dom.window.localStorage.getItem("aag_attribution") ?? "";
+      expect(stored).toContain('"channel":"Organic Social"');
+      expect(stored).toContain('"source":"linkedin"');
     } finally {
       dom.window.close();
     }
