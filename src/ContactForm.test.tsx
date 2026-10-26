@@ -918,7 +918,7 @@ describe("ContactForm — analytics (GTM dataLayer)", () => {
 describe("ContactForm — attribution hidden fields", () => {
   function setReferrer(referrer: string) {
     Object.defineProperty(document, "referrer", {
-      value: referrer,
+      get: () => referrer,
       configurable: true,
     });
   }
@@ -987,6 +987,30 @@ describe("ContactForm — attribution hidden fields", () => {
     expect(body.get("ft_channel")).toBe("Email");
     expect(body.get("lt_source")).toBe("newsletter");
     expect(body.get("conversion_page")).toBe(window.location.href);
+  });
+
+  it("prefers the newer mount capture over stale storage when the write failed", async () => {
+    window.history.replaceState(null, "", "/insights");
+    setReferrer("https://www.google.com/");
+    captureFromBrowser(window);
+    window.sessionStorage.clear();
+    window.history.replaceState(null, "", "/contact?gclid=new-click");
+    setReferrer("");
+    const realSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      if (this === window.localStorage) throw new DOMException("quota exceeded", "QuotaExceededError");
+      realSetItem.call(this, key, value);
+    });
+
+    const body = await submitAndReadBody();
+
+    expect(body.get("ft_channel")).toBe("Organic Search");
+    expect(body.get("lt_channel")).toBe("Paid Search");
+    expect(body.get("lt_click_id")).toBe("new-click");
   });
 
   it("still posts every key, empty, when attribution itself fails", async () => {

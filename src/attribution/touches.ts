@@ -17,6 +17,16 @@ export type AttributionState = {
   last: Touch;
 };
 
+/**
+ * The state whose last touch is more recent; `b` wins a tie. Pass storage as
+ * `a` and this page's capture as `b`: when the write landed both are the same,
+ * and when it failed the capture is the newer one.
+ */
+export function newerState(a: AttributionState | null, b: AttributionState | null) {
+  if (!a || !b) return a ?? b;
+  return Date.parse(b.last.date) >= Date.parse(a.last.date) ? b : a;
+}
+
 export function applyLanding(state: AttributionState | null, touch: Touch): AttributionState {
   if (!state) return { first: touch, last: touch };
   if (touch.source === DIRECT_SOURCE) return state;

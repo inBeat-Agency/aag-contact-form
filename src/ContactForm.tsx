@@ -17,7 +17,7 @@ import { ALLOWED_RESUME_EXTENSIONS } from "./schema";
 import { trackSubmission } from "./analytics";
 import { captureFromBrowser, readFromBrowser } from "./attribution/browser";
 import { attributionFields } from "./attribution/fields";
-import type { AttributionState } from "./attribution/touches";
+import { newerState, type AttributionState } from "./attribution/touches";
 
 export interface ContactFormProps {
   /** Endpoint the multipart payload is POSTed to (from `data-endpoint`). */
@@ -70,11 +70,14 @@ function captureAtMount(): AttributionState | null {
   }
 }
 
-/** The hidden fields from the STORED touches, never from the current URL. */
-function attributionAtSubmit(fallback: AttributionState | null) {
+/**
+ * The hidden fields from the STORED touches, never from the current URL. The
+ * mount capture wins only when it is newer, i.e. its write did not land.
+ */
+function attributionAtSubmit(mountState: AttributionState | null) {
   try {
     return attributionFields(
-      readFromBrowser(window) ?? fallback,
+      newerState(readFromBrowser(window), mountState),
       new Date(),
       window.location.href,
     );
