@@ -3,9 +3,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { buildFormData } from "../../src/submit";
+import { ATTRIBUTION_FIELD_KEYS } from "../../src/attribution/fields";
 import { INQUIRY_TYPES } from "../../src/schema";
 import type { ContactFormFields } from "../../src/schema";
 import {
+  ATTRIBUTION_PAYLOAD_KEYS,
   toZapierPayload,
   ZAPIER_PAYLOAD_KEYS,
   type ZapierPayload,
@@ -419,5 +421,13 @@ describe("golden fixtures", () => {
       expect(Object.keys(fixture)).toContain(key);
       expect(fixture[key]).toBe("");
     }
+  });
+});
+
+describe("attribution key lists", () => {
+  it("are the same keys in the same order on the widget and the Worker", () => {
+    // The widget may not import the Worker's list (see src/bundle.test.ts), so
+    // the contract is written twice. This is what keeps the copies in step.
+    expect([...ATTRIBUTION_FIELD_KEYS]).toEqual([...ATTRIBUTION_PAYLOAD_KEYS]);
   });
 });

@@ -5,6 +5,7 @@ import {
   SUBMIT_TIMEOUT_MS,
 } from "./submit";
 import type { ContactFormFields } from "./schema";
+import { ATTRIBUTION_FIELD_KEYS } from "./attribution/fields";
 
 // A fully-populated fields object; individual tests override what they exercise.
 function makeFields(
@@ -146,6 +147,49 @@ describe("buildFormData", () => {
   it("does not append a resume key when no file is selected", () => {
     const data = buildFormData(makeFields({ resume: null }), "src");
     expect(data.has("resume")).toBe(false);
+  });
+
+  it("appends the 22 attribution fields after the form fields, values intact", () => {
+    const attribution = ATTRIBUTION_FIELD_KEYS.map(
+      (key) => [key, `value-of-${key}`] as const,
+    );
+
+    const data = buildFormData(makeFields(), "src", attribution);
+
+    expect([...data.keys()]).toEqual([
+      "inquiryType",
+      "firstName",
+      "lastName",
+      "workEmail",
+      "message",
+      "title",
+      "company",
+      "phone",
+      "estimatedBudget",
+      "source",
+      ...ATTRIBUTION_FIELD_KEYS,
+    ]);
+    for (const key of ATTRIBUTION_FIELD_KEYS) {
+      expect(data.getAll(key)).toEqual([`value-of-${key}`]);
+    }
+    expect(data.get("inquiryType")).toBe("Consulting");
+    expect(data.get("firstName")).toBe("Jane");
+    expect(data.get("lastName")).toBe("Smith");
+    expect(data.get("workEmail")).toBe("jane@company.com");
+    expect(data.get("message")).toBe("We need help with hiring.");
+    expect(data.get("title")).toBe("Head of Talent");
+    expect(data.get("company")).toBe("Acme Inc.");
+    expect(data.get("phone")).toBe("+1 555 000 0000");
+    expect(data.get("estimatedBudget")).toBe("$50K – $150K");
+    expect(data.get("source")).toBe("src");
+  });
+
+  it("still sends every attribution key, empty, when the caller has none", () => {
+    const data = buildFormData(makeFields(), "src");
+
+    for (const key of ATTRIBUTION_FIELD_KEYS) {
+      expect(data.getAll(key)).toEqual([""]);
+    }
   });
 });
 

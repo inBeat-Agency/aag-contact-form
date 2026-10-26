@@ -15,6 +15,9 @@ import {
 import { buildFormData, submitContactForm } from "./submit";
 import { ALLOWED_RESUME_EXTENSIONS } from "./schema";
 import { trackSubmission } from "./analytics";
+import { captureFromBrowser, readFromBrowser } from "./attribution/browser";
+import { attributionFields } from "./attribution/fields";
+import type { AttributionState } from "./attribution/touches";
 
 export interface ContactFormProps {
   /** Endpoint the multipart payload is POSTed to (from `data-endpoint`). */
@@ -51,9 +54,39 @@ const SHOWS_PHONE_FIELD = new Set([
 
 const RESUME_ACCEPT = ALLOWED_RESUME_EXTENSIONS.join(",");
 
+// Attribution runs inside a third-party page and is best-effort: neither
+// helper may ever throw into rendering or the submit path.
+
+/**
+ * Record this page view as a possible landing, so attribution still works on a
+ * page where the site-wide tracker is missing. The returned state is the
+ * fallback when storage is blocked.
+ */
+function captureAtMount(): AttributionState | null {
+  try {
+    return captureFromBrowser(window);
+  } catch {
+    return null;
+  }
+}
+
+/** The hidden fields from the STORED touches, never from the current URL. */
+function attributionAtSubmit(fallback: AttributionState | null) {
+  try {
+    return attributionFields(
+      readFromBrowser(window) ?? fallback,
+      new Date(),
+      window.location.href,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 export function ContactForm({ endpoint, source }: ContactFormProps) {
   const [status, setStatus] = useState<Status>("idle");
   const successRef = useRef<HTMLDivElement>(null);
+  const [mountAttribution] = useState(captureAtMount);
 
   const {
     register,
@@ -90,7 +123,7 @@ export function ContactForm({ endpoint, source }: ContactFormProps) {
     setStatus("submitting");
     const result = await submitContactForm(
       endpoint,
-      buildFormData(values, source),
+      buildFormData(values, source, attributionAtSubmit(mountAttribution)),
     );
     // Fire here, not from an effect: StrictMode double-invokes effects, and
     // only a Worker-confirmed lead counts (never the honeypot fake success).
