@@ -54,7 +54,7 @@ value, so submitting without choosing a type fails and asks for one.
 ```bash
 npm install       # install dependencies
 npm run dev       # local dev harness at http://localhost:5173 (mock endpoint)
-npm run build     # produce the single embeddable bundle in dist/
+npm run build     # produce the widget bundle + the attribution tracker in dist/
 npm run test      # run the widget + Zapier payload contract tests (vitest)
 ```
 
@@ -71,11 +71,17 @@ the error panel, which is exactly the contract described below.
 
 ## Build output
 
-`npm run build` emits **one** file:
+`npm run build` emits **two** files:
 
 ```
-dist/aag-contact-form.js
+dist/aag-contact-form.js   # the widget (React, self-mounting IIFE)
+dist/aag-attribution.js    # the site-wide attribution tracker (≈5KB IIFE, no React)
 ```
+
+The tracker is built by a second Vite pass (`vite.tracker.config.ts`) because
+library mode cannot emit two IIFE entries from one build; it runs with
+`emptyOutDir: false` so the widget bundle survives. `src/bundle.test.ts` caps
+the tracker at 8KB and asserts it ships no React.
 
 All CSS is injected by JS at runtime — there is no separate stylesheet to load.
 
@@ -102,6 +108,34 @@ Cloudflare Pages script URL:
 
 The script is safe to place in the site `<head>`: it waits for
 `DOMContentLoaded` and does nothing if the mount div is absent.
+
+### Site-wide attribution tracker
+
+Paste this in Webflow **Site settings → Custom code → Head code**, so it runs
+on **every** page of the site — not just the contact page:
+
+```html
+<!-- Use an explicit release or commit SHA. Never use a "latest" URL. -->
+<script defer src="https://aag-contact-form.pages.dev/aag-attribution.js?v=<release-or-sha>"></script>
+```
+
+It is served from the same Cloudflare Pages deployment as the widget, so use the
+same `?v=` value as the widget embed and bump both together. Keep `defer`: the
+URL and `document.referrer` it reads are already final, so it never needs to
+block rendering on every page of the site.
+
+**Why site-wide:** a visitor almost never lands on the contact page. They land
+on a blog post from Google or a service page from a LinkedIn ad, read a few
+pages, and only then reach the form. The source has to be recorded on *that*
+landing page, while its URL (UTMs, click IDs) and `document.referrer` still say
+where the visitor came from. On the contact page, the referrer is usually our
+own site. See [Source attribution](#source-attribution).
+
+The tracker never throws and renders nothing — attribution must not break a
+page. The widget also runs the same capture when it mounts, as a fallback for
+a visitor who landed straight on the form page or a page missing the head
+script. That fallback cannot see landings on other pages, so it does not
+replace the head script.
 
 ### Theming
 
@@ -193,8 +227,9 @@ https://aag-contact-form.pages.dev/aag-contact-form.js?v=<release-or-sha>
 
 The table below is the shape the widget assembles with `buildFormData()` and
 POSTs to the Worker as `multipart/form-data`, unchanged. It is the contract with
-the Worker; the Worker converts it into the flat 15-key Zapier payload (see
-[Zapier delivery](#zapier-delivery-why-a-worker-sits-in-the-middle)).
+the Worker; the Worker converts it into the flat Zapier payload — the 15 form
+keys followed by the 22 attribution keys (see
+[Zapier JSON payload](#zapier-json-payload)).
 
 **A 2xx is not success.** The widget renders the success panel only when the
 response is `response.ok` **AND** its body parses as a JSON object whose `ok` is
@@ -213,7 +248,9 @@ Worker and is never constructed in the browser.
 Requests time out after 60s by default to accommodate the permitted 10MB resume
 upload.
 
-Flat, camelCase keys. Optional fields are omitted when empty.
+Flat keys: camelCase for the form fields, snake_case for the attribution
+fields. Optional form fields are omitted when empty; the attribution fields are
+always sent.
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -229,6 +266,7 @@ Flat, camelCase keys. Optional fields are omitted when empty.
 | `resume` | File | Submit Resume only | `.pdf/.doc/.docx`, ≤ 10MB |
 | `source` | string | when configured | Value of `data-source` |
 | `website` | — | never sent | Honeypot; if a bot fills it the client fakes success and never calls the API |
+| `ft_*`, `lt_*`, `conversion_page`, `days_to_convert` | string | always | The 22 attribution hidden fields, built from the **stored** touches, not the current URL; `""` when unknown. See [Zapier JSON payload](#zapier-json-payload) |
 
 > **`companySize` and `expectedTimeline` are no longer collected.** The form
 > dropped both from Consulting and Recruitment / Hiring — they were routinely
@@ -520,6 +558,34 @@ Ordered. Every intermediate state is safe; running these out of order is not.
    leads. Record the **new** hook URL in the runbook first — after this step the
    rollback path must point at the new hook, not the burned one.
 
+Attribution steps. The tracker only writes the visitor's own `localStorage` and
+sends nothing, so step 9 is safe at any point — publish it as early as possible,
+because every landing before it is a first touch lost. Attribution only reaches
+Zapier, Airtable and Loxo through the Worker, so step 10 can only pass after
+step 7.
+
+9. Publish the [site-wide attribution tracker](#site-wide-attribution-tracker)
+   in Webflow head code, on the same `?v=` as the widget, and republish the
+   site. On any page, DevTools → Application → Local Storage must show an
+   `aag_attribution` entry after the first page view.
+10. Verify attribution on test leads (the brief's acceptance tests). Use a
+    fresh private window per case; a new tab or a browser restart is a new
+    session.
+    - A UTM link, then 3+ pages, then submit: both `ft_*` and `lt_*` keep the
+      UTM values.
+    - A Google organic visit: `Organic Search` / `google` / `organic`.
+    - A `gclid`-only link: `Paid Search` / `google` / `cpc`, and `ft_click_id`
+      holds the `gclid` value.
+    - A LinkedIn post click: `Organic Social` / `linkedin` / `social`.
+    - A direct visit: `Direct` / `(direct)` / `(none)`.
+    - Cross-session: first visit from a Google Ads UTM link, return 2+ days
+      later via organic search, submit. `ft_*` show `Paid Search`, `lt_*` show
+      `Organic Search`, `days_to_convert` ≥ 2.
+    - A direct return visit does not overwrite last touch.
+    - All 22 fields are filled on the test lead in Airtable and Loxo, and both
+      reports list it under the right channel (see
+      [Handoff](#handoff-airtable-loxo-and-reports)).
+
 Rollback is the same attribute: `data-endpoint` is runtime configuration in the
 Webflow embed, so pointing it elsewhere restores delivery without a code deploy.
 
@@ -530,10 +596,12 @@ Zap.
 
 #### Zapier JSON payload
 
-Flat, camelCase, **all values are strings**. No nulls, numbers, arrays or nested
-objects.
+Flat, **all values are strings**. No nulls, numbers, arrays or nested objects.
+The 15 form keys are camelCase; the 22 attribution keys that follow them are
+snake_case, matching the hidden-field names in the brief.
 
-**Every one of the 15 keys is always present.** Fields that do not apply to the
+**Every one of the 37 keys is always present** — the 15 form keys, then the 22
+attribution keys. Fields that do not apply to the
 submitted `inquiryType` carry the empty string `""` — they are never omitted and
 never `null`. This is deliberate: Zapier builds its field-mapping picker from
 whichever sample payload it happened to receive, so a payload that pruned empty
@@ -559,6 +627,37 @@ dropping empty keys.**
 | `source` | Value of `data-source` |
 | `submittedAt` | ISO-8601, e.g. `2026-07-30T14:18:41.000Z` |
 
+Then the 22 attribution keys, **appended** in this exact order (never
+interleaved, so the 15 keys above keep their positions in the live Zap). Each
+`ft_*` key has an `lt_*` twin in the same position — `ft_` is the first touch,
+`lt_` the last touch:
+
+| First touch | Last touch | Meaning |
+| --- | --- | --- |
+| `ft_channel` | `lt_channel` | One of the 9 channels — see [Channel grouping](#channel-grouping) |
+| `ft_source` | `lt_source` | `utm_source`, the ad network, search engine, social network, assistant, referring domain or `(direct)` |
+| `ft_medium` | `lt_medium` | `utm_medium`, or `cpc` / `organic` / `social` / `ai` / `referral` / `(none)` |
+| `ft_campaign` | `lt_campaign` | `utm_campaign` |
+| `ft_term` | `lt_term` | `utm_term` |
+| `ft_content` | `lt_content` | `utm_content` |
+| `ft_click_id` | `lt_click_id` | Value of the ad click ID (`gclid`, `msclkid`, `fbclid`…), even when UTMs won |
+| `ft_landing_page` | `lt_landing_page` | Full landing URL, query string included |
+| `ft_referrer` | `lt_referrer` | Referring URL; `""` for direct and ignored referrers |
+| `ft_date` | `lt_date` | Landing time, ISO-8601 |
+
+| Key | Meaning |
+| --- | --- |
+| `conversion_page` | Full URL of the page the form was submitted on |
+| `days_to_convert` | Whole days from `ft_date` to submission, floored, never negative; `""` without a first touch |
+
+The attribution keys are `""` when nothing is known — storage blocked and no
+capture, or a body from a cached widget that predates attribution. URLs are
+capped at 2000 characters and other values at 500.
+
+The Worker accepts up to `MAX_TEXT_FIELD_COUNT` = **40** text fields per
+submission (`worker/src/limits.ts`); the widget sends up to 35 (13 form fields
+plus the 22 attribution fields).
+
 Population by inquiry type — `•` populated, `""` always empty:
 
 | Key | General Question | Consulting | Recruitment / Hiring | Submit Resume |
@@ -569,6 +668,7 @@ Population by inquiry type — `•` populated, `""` always empty:
 | `estimatedBudget` | `""` | • optional | • optional | `""` |
 | `companySize`, `expectedTimeline` | `""` | `""` | `""` | `""` |
 | `resumeUrl`, `resumeFileName` | `""` | `""` | `""` | • |
+| `ft_*`, `lt_*`, `conversion_page`, `days_to_convert` | • | • | • | • |
 
 > **`companySize` and `expectedTimeline` are retired, not removed.** The form
 > stopped collecting them, so they are now empty for *every* inquiry type — but
@@ -629,6 +729,135 @@ Expected GTM setup (container `GTM-59KZSPX7`):
 4. In GA4, register `inquiry_type`, `form_source` and `interest` as
    event-scoped custom dimensions, and mark `generate_lead` as a key event.
 
+## Source attribution
+
+Every lead carries its **first-touch** and **last-touch** traffic source
+(ClickUp 868mmr0c4, brief "Contact Form Source Tracking – First & Last Touch").
+The [site-wide tracker](#site-wide-attribution-tracker) records the source on
+every landing; on submit, the widget sends the 22
+[attribution keys](#zapier-json-payload) from the **stored** values, never from
+the current URL. The code is `src/attribution/`, with tests next to each module.
+
+### What counts as a landing
+
+A page view is a landing when either:
+
+- **it starts a new session** — no `aag_attribution_session` marker in
+  `sessionStorage`. That marker is per tab and dies with the browser session,
+  which is what a visitor returning days later looks like; or
+- **its URL carries a UTM or an ad click ID** (`utm_source`, `utm_medium`,
+  `utm_campaign`, `utm_term`, `utm_content`, `gclid`, `gbraid`, `wbraid`,
+  `msclkid`, `fbclid`, `li_fat_id`, `ttclid`), even inside an open session — a
+  second ad click is a new last touch.
+
+Any other page view is internal browsing and changes nothing. That is what
+keeps a UTM landing's values intact through the pages a visitor reads before
+reaching the form.
+
+### Source rules
+
+In priority order; the first match wins (`src/attribution/source.ts`):
+
+| # | When | Source | Medium |
+| --- | --- | --- | --- |
+| 1 | Any UTM present (campaign, term and content are kept too) | `utm_source` as typed | `utm_medium` as typed |
+| 2 | Ad click ID, no UTMs | `gclid` / `gbraid` / `wbraid` → `google`, `msclkid` → `bing`, `fbclid` → `facebook`, `li_fat_id` → `linkedin`, `ttclid` → `tiktok` | `cpc` |
+| 3 | Search engine referrer (Google, Bing, Yahoo, DuckDuckGo, Baidu, Yandex, Ecosia, Brave) | engine name | `organic` |
+| 4 | Social referrer (Facebook, Instagram, LinkedIn, t.co / X / Twitter, YouTube, Reddit, TikTok) | network | `social` |
+| 5 | AI assistant referrer (chatgpt.com, perplexity.ai, gemini.google.com, copilot.microsoft.com, claude.ai) | assistant | `ai` |
+| 6 | Any other external referrer | domain without `www.` | `referral` |
+| 7 | No referrer | `(direct)` | `(none)` |
+
+The click ID value is recorded in `*_click_id` even when UTMs win. Referrers
+are matched on the hostname, never a substring of the URL.
+
+**Ignored referrers** count as no referrer (rule 7): `alphaapexgroup.com` and
+all its subdomains, the current host (so the Webflow staging domain never
+refers itself), and payment / login hosts (`accounts.google.com`,
+`login.microsoftonline.com`, `login.live.com`, `appleid.apple.com`,
+`paypal.com`, `stripe.com`).
+
+> **`fbclid` and `li_fat_id` alone mean Paid Search.** The brief maps every
+> click ID without UTMs to `cpc`, so they classify as `Paid Search` — even
+> though Facebook and LinkedIn also append them to *organic* link clicks. Tag
+> every paid social link with UTMs (`utm_medium=paid_social`) to get
+> `Paid Social`; UTMs always win over the click ID.
+
+### Channel grouping
+
+`ft_channel` / `lt_channel` roll source and medium up into exactly nine values
+(`CHANNELS` in `src/attribution/channel.ts`). Medium is compared
+case-insensitively; the medium rules are checked before the direct rule.
+
+| Rule | Channel |
+| --- | --- |
+| medium = `cpc` / `ppc` / `paid_search` | Paid Search |
+| medium = `paid_social` | Paid Social |
+| medium = `organic` | Organic Search |
+| medium = `social` | Organic Social |
+| medium = `ai` | AI Assistant |
+| medium = `email` | Email |
+| medium = `referral` | Referral |
+| source = `(direct)` | Direct |
+| anything else | Other |
+
+The channel names are a **public contract with Loxo and Airtable** (dropdown
+options). Renaming one breaks the dropdown for every new lead — change both
+CRMs in the same release.
+
+### First touch and last touch
+
+`src/attribution/touches.ts`:
+
+- **First touch** is written on the visitor's very first landing and never
+  overwritten.
+- **Last touch** is overwritten on each new landing with a known source. A
+  direct landing never overwrites it (last non-direct click). Ignored referrers
+  count as direct, so internal navigation never overwrites it either.
+- A visitor who converts on their first visit has identical first and last
+  touches. That is expected.
+
+### Storage and expiry
+
+The state lives in first-party `localStorage` under the key `aag_attribution`
+(`src/attribution/storage.ts`). It expires **90 days after the last landing**:
+the expiry restarts on every landing, the way a cookie's expiry is refreshed on
+every write. After 90 days without a landing, the next landing starts over as
+a new first touch. Nothing is sent anywhere until the visitor submits the form.
+
+The stored value is treated as untrusted input and validated field by field; a
+corrupted value counts as no history. Blocked storage degrades to "no history",
+never to an error.
+
+### Consent
+
+Every write goes through one function, `canStore()` in
+`src/attribution/storage.ts`, which today always returns `true`.
+
+**The site has no consent manager (CMP).** The live page loads only GTM
+`GTM-59KZSPX7`, the container has no CMP template or consent-default tag, and it
+already fires GA4 (`G-92Q3DNC9DN`) and the Google Ads conversion linker without
+consent. When a CMP is added, hook it into `canStore()` and nowhere else.
+
+### Handoff: Airtable, Loxo and reports
+
+This repo stops at delivering the 22 keys to Zapier. The rest is owned outside
+it — Loxo by Sean Lewis; loop in Richard Silva.
+
+- [ ] **Airtable** (leads land there first): create one field per attribution
+      key — all 22, named exactly as in [Zapier JSON payload](#zapier-json-payload).
+- [ ] **Loxo**: create a matching custom field for each of the 22 keys.
+- [ ] In both, make `ft_channel` and `lt_channel` **dropdowns** with exactly
+      these 9 options: `Paid Search`, `Paid Social`, `Organic Search`,
+      `Organic Social`, `AI Assistant`, `Email`, `Referral`, `Direct`, `Other`.
+- [ ] **Zapier**: replay the fixtures (`npm run zapier:samples`) so the picker
+      sees the new keys, then map all 22 into Airtable and Loxo.
+- [ ] **Reports**: build the first-touch report (by `ft_channel`) and the
+      last-touch report (by `lt_channel`) — two reports or one dashboard with
+      two views, aligned with Sean Lewis.
+- [ ] Run the attribution checks in [Cutover checklist](#cutover-checklist)
+      step 10.
+
 ## Project structure
 
 ```
@@ -640,6 +869,8 @@ src/
   ContactForm.tsx  # the form component (progressive disclosure, states, honeypot)
   main.tsx         # self-mounting entry point (reads data attributes)
   styles.css       # layout-only widget CSS (Webflow owns field/button visuals)
+  tracker.ts       # site-wide attribution tracker entry (Webflow head code)
+  attribution/     # first/last-touch source logic, storage + the 22 hidden fields
 worker/
   src/payload.ts       # pure multipart -> Zapier JSON transform (no React, no zod)
   src/payload.test.ts  # contract test, driven by the widget's real buildFormData()
@@ -649,6 +880,7 @@ scripts/
   send-zapier-samples.ts  # manual fixture replay against the Catch Hook
 index.html         # dev harness with a mocked backend + the Webflow stylesheet
 vite.config.ts     # single-file IIFE build (CSS injected by JS)
+vite.tracker.config.ts  # second IIFE build: dist/aag-attribution.js
 ```
 
 `scripts/` is typechecked by `tsc -b` (via `tsconfig.worker.json`) and never
