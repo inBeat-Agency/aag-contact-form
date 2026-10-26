@@ -1,0 +1,24 @@
+/**
+ * First-touch vs. last-touch rules (brief S4).
+ *
+ * - First touch is written on the visitor's very first landing and never
+ *   overwritten.
+ * - Last touch is overwritten on each new landing with a known source. A direct
+ *   landing never overwrites it (last non-direct click).
+ * - A visitor who converts on their first visit has identical touches. That is
+ *   expected, not a bug.
+ */
+
+import { DIRECT_SOURCE } from "./channel";
+import type { Touch } from "./source";
+
+export type AttributionState = {
+  first: Touch;
+  last: Touch;
+};
+
+export function applyLanding(state: AttributionState | null, touch: Touch): AttributionState {
+  if (!state) return { first: touch, last: touch };
+  if (touch.source === DIRECT_SOURCE) return state;
+  return { first: state.first, last: touch };
+}
