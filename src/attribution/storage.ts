@@ -104,11 +104,12 @@ export function readState(storage: Storage | null, now: Date): AttributionState 
 }
 
 /**
- * Persist the state for another 90 days. Never throws; quota or privacy errors
- * drop the write. Does not ask {@link canStore}: its caller does.
+ * Persist the state for another 90 days; reports whether it was stored. Never
+ * throws; quota or privacy errors drop the write. Does not ask {@link canStore}:
+ * its caller does.
  */
 export function writeState(storage: Storage | null, state: AttributionState, now: Date) {
-  if (!storage) return;
+  if (!storage) return false;
 
   try {
     storage.setItem(
@@ -120,7 +121,9 @@ export function writeState(storage: Storage | null, state: AttributionState, now
         last: state.last,
       }),
     );
+    return true;
   } catch {
     // Storage full or blocked: this landing is still returned in memory.
+    return false;
   }
 }

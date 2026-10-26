@@ -92,8 +92,10 @@ export function captureLanding(environment: CaptureEnvironment): AttributionStat
   if (stored && !isNewLanding) return stored;
 
   const state = applyLanding(stored, resolveTouch(landing));
-  if (canStore()) {
-    writeState(local, state, landing.now);
+  // The session only closes over a landing that was actually stored: otherwise
+  // a second capture of this page view (the widget after the tracker) would
+  // read the old state back and lose this landing.
+  if (canStore() && writeState(local, state, landing.now)) {
     writeSessionLanding(session, landing.url);
   }
   return state;

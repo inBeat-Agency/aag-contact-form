@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { captureLanding } from "./capture";
 import { ATTRIBUTION_STORAGE_KEY } from "./storage";
 
@@ -175,5 +175,32 @@ describe("captureLanding — S1 storage and 90-day expiry", () => {
 
     expect(state.first).toMatchObject({ clickId: "g-1" });
     expect(state.last).toEqual(state.first);
+  });
+});
+
+describe("captureLanding — a failed write never closes the session", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("keeps a new campaign landing when localStorage is full and the page is captured twice", () => {
+    visit("/", "https://www.google.com/", T0);
+    endSession();
+    const realSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      if (this === window.localStorage) throw new DOMException("quota exceeded", "QuotaExceededError");
+      realSetItem.call(this, key, value);
+    });
+
+    visit("/?gclid=g-2", "", at(1));
+    const state = visit("/?gclid=g-2", "", at(1.001));
+
+    expect(state.first).toMatchObject({ source: "google", medium: "organic" });
+    expect(state.last).toMatchObject({ channel: "Paid Search", clickId: "g-2" });
+    expect(window.sessionStorage.length).toBe(0);
   });
 });
