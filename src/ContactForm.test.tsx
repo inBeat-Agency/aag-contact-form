@@ -8,6 +8,8 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ContactForm } from "./ContactForm";
+import { captureFromBrowser } from "./attribution/browser";
+import { ATTRIBUTION_FIELD_KEYS } from "./attribution/fields";
 
 // Label-text queries include aria-hidden text, unlike accessible-name queries.
 // Ignore only the decorative suffix here; marker and accessible-name assertions
@@ -910,5 +912,121 @@ describe("ContactForm — analytics (GTM dataLayer)", () => {
     expect(await screen.findByText("First name is required")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(submitEvents()).toHaveLength(0);
+  });
+});
+
+describe("ContactForm — attribution hidden fields", () => {
+  function setReferrer(referrer: string) {
+    Object.defineProperty(document, "referrer", {
+      get: () => referrer,
+      configurable: true,
+    });
+  }
+
+  async function submitAndReadBody() {
+    const user = await fillMinimalInquiry();
+    await user.click(screen.getByRole("button", { name: /submit/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    return init.body as FormData;
+  }
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    window.history.replaceState(null, "", "/");
+    setReferrer("");
+  });
+
+  it("posts first and last touch from storage, not from the current page URL", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/services?utm_source=google&utm_medium=cpc&utm_campaign=q4&gclid=abc123",
+    );
+    setReferrer("https://www.google.com/");
+    const landing = captureFromBrowser(window).first;
+    window.history.replaceState(null, "", "/contact");
+    setReferrer("");
+
+    const body = await submitAndReadBody();
+
+    for (const prefix of ["ft", "lt"]) {
+      expect(body.get(`${prefix}_channel`)).toBe("Paid Search");
+      expect(body.get(`${prefix}_source`)).toBe("google");
+      expect(body.get(`${prefix}_medium`)).toBe("cpc");
+      expect(body.get(`${prefix}_campaign`)).toBe("q4");
+      expect(body.get(`${prefix}_click_id`)).toBe("abc123");
+      expect(body.get(`${prefix}_landing_page`)).toBe(landing.landingPage);
+      expect(body.get(`${prefix}_date`)).toBe(landing.date);
+    }
+    expect(window.location.search).toBe("");
+    expect(body.get("conversion_page")).toBe(window.location.href);
+    expect(body.get("days_to_convert")).toBe("0");
+    expect(body.get("inquiryType")).toBe("General Question");
+    expect(body.get("source")).toBe("unit-test");
+  });
+
+  it("falls back to the page view captured at mount when storage is blocked", async () => {
+    window.history.replaceState(null, "", "/contact?utm_source=newsletter&utm_medium=email");
+    vi.spyOn(window, "localStorage", "get").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+    vi.spyOn(window, "sessionStorage", "get").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+
+    const body = await submitAndReadBody();
+
+    expect(body.get("ft_channel")).toBe("Email");
+    expect(body.get("lt_source")).toBe("newsletter");
+    expect(body.get("conversion_page")).toBe(window.location.href);
+  });
+
+  it("prefers the newer mount capture over stale storage when the write failed", async () => {
+    window.history.replaceState(null, "", "/insights");
+    setReferrer("https://www.google.com/");
+    captureFromBrowser(window);
+    window.sessionStorage.clear();
+    window.history.replaceState(null, "", "/contact?gclid=new-click");
+    setReferrer("");
+    const realSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      if (this === window.localStorage) throw new DOMException("quota exceeded", "QuotaExceededError");
+      realSetItem.call(this, key, value);
+    });
+
+    const body = await submitAndReadBody();
+
+    expect(body.get("ft_channel")).toBe("Organic Search");
+    expect(body.get("lt_channel")).toBe("Paid Search");
+    expect(body.get("lt_click_id")).toBe("new-click");
+  });
+
+  it("still posts every key, empty, when attribution itself fails", async () => {
+    vi.spyOn(document, "referrer", "get").mockImplementation(() => {
+      throw new Error("hostile host page");
+    });
+
+    const body = await submitAndReadBody();
+
+    for (const key of ATTRIBUTION_FIELD_KEYS) {
+      expect(body.has(key)).toBe(true);
+    }
+    expect(body.get("ft_channel")).toBe("");
+    expect(body.get("lt_source")).toBe("");
+    expect(body.get("days_to_convert")).toBe("");
+    expect(body.get("conversion_page")).toBe(window.location.href);
+    expect(await screen.findByRole("status")).toHaveTextContent("Thanks!");
   });
 });

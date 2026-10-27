@@ -1,4 +1,5 @@
 import type { ContactFormFields } from "./schema";
+import { attributionFields, type AttributionFields } from "./attribution/fields";
 
 /** Upload-safe wall-clock default for the submission request. */
 export const SUBMIT_TIMEOUT_MS = 60_000;
@@ -25,10 +26,14 @@ export type SubmitResult =
  * longer collects them. They are still part of the Zapier wire contract and are
  * coined as empty strings by `worker/src/payload.ts`, which is the only place
  * that concern belongs. Do not re-add them to this body to "match" the payload.
+ *
+ * The 22 attribution fields (`src/attribution/fields.ts`) follow the form
+ * fields and, unlike the optional ones, are always sent, empty when unknown.
  */
 export function buildFormData(
   values: ContactFormFields,
   source: string | null,
+  attribution: AttributionFields = attributionFields(null, new Date(), ""),
 ): FormData {
   const data = new FormData();
 
@@ -53,6 +58,8 @@ export function buildFormData(
 
   if (source) data.append("source", source);
 
+  for (const [key, value] of attribution) data.append(key, value);
+
   return data;
 }
 
@@ -62,9 +69,10 @@ export function buildFormData(
  *
  * The widget posts the `FormData` from `buildFormData()` unchanged. The Worker
  * parses the multipart body, uploads the resume to object storage, and forwards
- * the flat 15-key JSON that `worker/src/payload.ts` produces. That transform is
- * SERVER-SIDE and must stay there: it is the only place that knows the stored
- * resume URL, and posting a flat body from the browser is what drops the file.
+ * the flat JSON that `worker/src/payload.ts` produces: the 15 form keys followed
+ * by the 22 attribution keys. That transform is SERVER-SIDE and must stay there:
+ * it is the only place that knows the stored resume URL, and posting a flat body
+ * from the browser is what drops the file.
  *
  * DO NOT post directly to Zapier from here. That was tried:
  *

@@ -2,7 +2,8 @@
  * Manual replay: POST every golden fixture to the Zapier Catch Hook as JSON.
  *
  * Run this once when setting up (or re-teaching) the Zap, so Zapier learns the
- * full field list and its mapping picker offers all 15 keys.
+ * full field list and its mapping picker offers all 37 keys (the original 15
+ * plus the 22 attribution fields).
  *
  *   ZAPIER_HOOK_URL="https://hooks.zapier.com/hooks/catch/…" npm run zapier:samples
  *

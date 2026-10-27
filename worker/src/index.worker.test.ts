@@ -27,6 +27,32 @@ import {
 } from "./limits";
 import type { ZapierPayload } from "./payload";
 
+/** The 22 attribution hidden fields (brief S5), in wire order, by hand. */
+const ATTRIBUTION_KEYS = [
+  "ft_channel",
+  "ft_source",
+  "ft_medium",
+  "ft_campaign",
+  "ft_term",
+  "ft_content",
+  "ft_click_id",
+  "ft_landing_page",
+  "ft_referrer",
+  "ft_date",
+  "lt_channel",
+  "lt_source",
+  "lt_medium",
+  "lt_campaign",
+  "lt_term",
+  "lt_content",
+  "lt_click_id",
+  "lt_landing_page",
+  "lt_referrer",
+  "lt_date",
+  "conversion_page",
+  "days_to_convert",
+] as const;
+
 /**
  * Runtime tests for the Worker, executed inside workerd by
  * `@cloudflare/vitest-pool-workers` (see `vitest.worker.config.ts`).
@@ -1107,6 +1133,9 @@ function maximalValidSubmission(): FormData {
   form.append("estimatedBudget", "$50K – $150K");
   form.append("source", "aag-contact-form");
   form.append("website", "");
+  for (const key of ATTRIBUTION_KEYS) {
+    form.append(key, maximalText(MAX_TEXT_FIELD_BYTES));
+  }
 
   const name = `${"n".repeat(MAX_FILE_NAME_BYTES - ".pdf".length)}.pdf`;
   const file = makeFile(name, "application/pdf", PDF_MAGIC, MAX_RESUME_BYTES);
@@ -1144,6 +1173,42 @@ describe("a submission that satisfies every rule is NEVER refused", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ ok: true });
+  });
+
+  /**
+   * L6. The widget sends up to 13 text fields of its own; the 22 attribution
+   * hidden fields take it to 35. The old cap of 16 refused every such lead.
+   */
+  it("accepts the widget's full text-field set plus the 22 attribution fields", async () => {
+    const captured = interceptZapier();
+    const form = new FormData();
+    for (const [key, value] of [
+      ["inquiryType", "Consulting"],
+      ["firstName", "Jane"],
+      ["lastName", "Doe"],
+      ["workEmail", "jane.doe@example.com"],
+      ["title", "CTO"],
+      ["company", "Example Co"],
+      ["phone", "+1 555 0100"],
+      ["estimatedBudget", "$50K – $150K"],
+      ["message", "Please get in touch about this."],
+      ["source", "aag-contact-form"],
+      ["website", ""],
+      ["companySize", ""],
+      ["expectedTimeline", ""],
+    ] as const) {
+      form.append(key, value);
+    }
+    for (const key of ATTRIBUTION_KEYS) form.append(key, `value-of-${key}`);
+    expect([...form.keys()]).toHaveLength(35);
+
+    const response = await postForm(form);
+
+    expect(response.status).toBe(200);
+    const forwarded = JSON.parse(captured.body!) as Record<string, string>;
+    for (const key of ATTRIBUTION_KEYS) {
+      expect(forwarded[key], key).toBe(`value-of-${key}`);
+    }
   });
 
   /**
@@ -1681,11 +1746,15 @@ function fixtureResumeFile(fixture: ZapierPayload): File | null {
   });
 }
 
+/** `set`, not `append`, so this stays correct once `buildFormData()` appends
+ * the attribution fields itself. */
 function fixtureFormData(fixture: ZapierPayload): FormData {
-  return buildFormData(
+  const form = buildFormData(
     widgetFieldsFor(fixture, fixtureResumeFile(fixture)),
     fixture.source,
   );
+  for (const key of ATTRIBUTION_KEYS) form.set(key, fixture[key]);
+  return form;
 }
 
 const FIXTURES: [string, ZapierPayload][] = [
@@ -1725,8 +1794,8 @@ describe("POST /submit - forwards flat JSON to Zapier, never multipart", () => {
    *     parse to an instant inside the request it was produced by, so a frozen,
    *     stale or fabricated timestamp still fails.
    *
-   * A serialization that drops a key, adds a sixteenth, reorders the contract or
-   * silently becomes multipart cannot survive this comparison.
+   * A serialization that drops a key, adds an unlisted one, reorders the
+   * contract or silently becomes multipart cannot survive this comparison.
    */
   it.each(FIXTURES)(
     "sends %s byte-for-byte as the frozen fixture",
@@ -1785,7 +1854,7 @@ describe("POST /submit - forwards flat JSON to Zapier, never multipart", () => {
     expect(captured.body).not.toContain("filename=");
   });
 
-  it("carries all 15 contract keys in the frozen order", async () => {
+  it("carries every contract key in the frozen order", async () => {
     const captured = interceptZapier();
 
     await postForm(fixtureFormData(submitResume as ZapierPayload));
@@ -1796,9 +1865,25 @@ describe("POST /submit - forwards flat JSON to Zapier, never multipart", () => {
   });
 
   /**
+   * A cached copy of the pre-attribution widget sends none of the 22 keys. The
+   * lead still goes through, and Zapier still receives every key, empty.
+   */
+  it("forwards empty attribution keys for a body from an older cached widget", async () => {
+    const captured = interceptZapier();
+
+    const response = await postForm(completeSubmission("General Question"));
+
+    expect(response.status).toBe(200);
+    const forwarded = JSON.parse(captured.body!) as Record<string, string>;
+    expect(Object.keys(forwarded)).toEqual(Object.keys(generalQuestion));
+    for (const key of ATTRIBUTION_KEYS) expect(forwarded[key], key).toBe("");
+    expect(forwarded.firstName).toBe("Jane");
+  });
+
+  /**
    * The Zap filters on this header. Without it, anyone who scraped the hook URL
    * from the old public embed can still post forged leads straight into it.
-   * It travels as a HEADER precisely so the 15-key body stays frozen.
+   * It travels as a HEADER precisely so the contract body stays frozen.
    */
   it("authenticates itself with the shared secret in a header", async () => {
     const captured = interceptZapier();

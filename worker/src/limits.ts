@@ -134,11 +134,12 @@ export const MAX_TEXT_FIELD_BYTES = 16 * 1024; // 16KB, ~4000 words of prose
 export const MAX_TEXT_FIELD_CHARS = Math.floor(MAX_TEXT_FIELD_BYTES / 3);
 
 /**
- * How many text fields a submission may carry. The widget sends thirteen; the
+ * How many text fields a submission may carry. The widget sends up to
+ * thirty-five (thirteen form fields plus the 22 attribution hidden fields); the
  * margin is for future fields, and the cap is what makes the payload budget
  * below an actual bound rather than an estimate.
  */
-export const MAX_TEXT_FIELD_COUNT = 16;
+export const MAX_TEXT_FIELD_COUNT = 40;
 
 /** Every text field at its cap, which is the worst legal text payload. */
 export const MAX_TEXT_PAYLOAD_BYTES =

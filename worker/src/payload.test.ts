@@ -3,9 +3,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { buildFormData } from "../../src/submit";
+import { ATTRIBUTION_FIELD_KEYS } from "../../src/attribution/fields";
 import { INQUIRY_TYPES } from "../../src/schema";
 import type { ContactFormFields } from "../../src/schema";
 import {
+  ATTRIBUTION_PAYLOAD_KEYS,
   toZapierPayload,
   ZAPIER_PAYLOAD_KEYS,
   type ZapierPayload,
@@ -47,6 +49,79 @@ function readFixture(name: FixtureName): ZapierPayload {
 }
 
 /**
+ * The 15 keys the client's live Zap already maps, WRITTEN OUT BY HAND. They
+ * must keep their names and positions forever; new keys only ever go after
+ * `submittedAt`.
+ */
+const ORIGINAL_KEYS = [
+  "inquiryType",
+  "firstName",
+  "lastName",
+  "workEmail",
+  "title",
+  "company",
+  "phone",
+  "companySize",
+  "estimatedBudget",
+  "expectedTimeline",
+  "message",
+  "resumeUrl",
+  "resumeFileName",
+  "source",
+  "submittedAt",
+] as const;
+
+/** The 22 attribution hidden fields (brief S5), in wire order, by hand. */
+const ATTRIBUTION_KEYS = [
+  "ft_channel",
+  "ft_source",
+  "ft_medium",
+  "ft_campaign",
+  "ft_term",
+  "ft_content",
+  "ft_click_id",
+  "ft_landing_page",
+  "ft_referrer",
+  "ft_date",
+  "lt_channel",
+  "lt_source",
+  "lt_medium",
+  "lt_campaign",
+  "lt_term",
+  "lt_content",
+  "lt_click_id",
+  "lt_landing_page",
+  "lt_referrer",
+  "lt_date",
+  "conversion_page",
+  "days_to_convert",
+] as const;
+
+/**
+ * The attribution fields the widget sends alongside the form, taken from the
+ * fixture. `set`, not `append`, so this stays correct once `buildFormData()`
+ * appends them itself.
+ */
+function withAttribution(formData: FormData, fixture: ZapierPayload): FormData {
+  for (const key of ATTRIBUTION_KEYS) formData.set(key, fixture[key]);
+  return formData;
+}
+
+/** A minimal Consulting body as the pre-attribution widget sent it. */
+function preAttributionFormData(): FormData {
+  const formData = new FormData();
+  formData.set("inquiryType", "Consulting");
+  formData.set("firstName", "Felipe");
+  formData.set("lastName", "Test");
+  formData.set("workEmail", "felipe.test+attribution@example.com");
+  formData.set("title", "TEST TITLE");
+  formData.set("company", "TEST COMPANY (DO NOT CONTACT)");
+  formData.set("message", "[TEST DATA] Attribution contract check.");
+  formData.set("source", "TEST-SAMPLE");
+  return formData;
+}
+
+/**
  * Rebuild the widget-side form state that would have produced a fixture, so the
  * sample data lives in exactly one place: the fixture file itself.
  */
@@ -79,9 +154,9 @@ function resumeFileFor(fixture: ZapierPayload): File | null {
 
 /** Run a fixture end to end: widget form state -> FormData -> Zapier payload. */
 function transformFixture(fixture: ZapierPayload): ZapierPayload {
-  const formData = buildFormData(
-    widgetFieldsFor(fixture, resumeFileFor(fixture)),
-    fixture.source,
+  const formData = withAttribution(
+    buildFormData(widgetFieldsFor(fixture, resumeFileFor(fixture)), fixture.source),
+    fixture,
   );
 
   return toZapierPayload(formData, {
@@ -100,7 +175,7 @@ describe("toZapierPayload", () => {
       expect(transformFixture(fixture)).toStrictEqual(fixture);
     });
 
-    it("emits all 15 contract keys, in contract order", () => {
+    it("emits every contract key, in contract order", () => {
       expect(Object.keys(transformFixture(fixture))).toEqual([
         ...ZAPIER_PAYLOAD_KEYS,
       ]);
@@ -113,9 +188,12 @@ describe("toZapierPayload", () => {
     });
 
     it("covers every text field the widget actually sends", () => {
-      const formData = buildFormData(
-        widgetFieldsFor(fixture, resumeFileFor(fixture)),
-        fixture.source,
+      const formData = withAttribution(
+        buildFormData(
+          widgetFieldsFor(fixture, resumeFileFor(fixture)),
+          fixture.source,
+        ),
+        fixture,
       );
 
       // Anything the widget sends as text must have a home in the payload.
@@ -128,6 +206,56 @@ describe("toZapierPayload", () => {
           `widget sends "${key}" but the Zapier contract has no such key`,
         ).toContain(key);
       }
+    });
+  });
+
+  it("keeps the original 15 keys first, unchanged and in their original order", () => {
+    expect(ZAPIER_PAYLOAD_KEYS.slice(0, ORIGINAL_KEYS.length)).toEqual([
+      ...ORIGINAL_KEYS,
+    ]);
+  });
+
+  it("appends the 22 attribution keys after submittedAt, in wire order", () => {
+    expect([...ZAPIER_PAYLOAD_KEYS]).toEqual([
+      ...ORIGINAL_KEYS,
+      ...ATTRIBUTION_KEYS,
+    ]);
+  });
+
+  it("forwards every attribution value the widget sends", () => {
+    const formData = preAttributionFormData();
+    for (const key of ATTRIBUTION_KEYS) formData.set(key, `value-of-${key}`);
+
+    const payload = toZapierPayload(formData, {
+      submittedAt: "2026-10-26T12:00:00.000Z",
+    });
+
+    expect(Object.keys(payload)).toEqual([...ORIGINAL_KEYS, ...ATTRIBUTION_KEYS]);
+    for (const key of ATTRIBUTION_KEYS) {
+      expect(payload[key], key).toBe(`value-of-${key}`);
+    }
+    expect(payload.firstName).toBe("Felipe");
+    expect(payload.submittedAt).toBe("2026-10-26T12:00:00.000Z");
+  });
+
+  /**
+   * A cached copy of the pre-attribution widget keeps POSTing without any of
+   * the 22 keys. That is still a real lead: every attribution key is coined as
+   * the empty string so the Zap mapping resolves, and nothing else changes.
+   */
+  it("yields empty attribution keys for a body from an older cached widget", () => {
+    const payload = toZapierPayload(preAttributionFormData(), {
+      submittedAt: "2026-10-26T12:00:00.000Z",
+    });
+
+    expect(Object.keys(payload)).toEqual([...ORIGINAL_KEYS, ...ATTRIBUTION_KEYS]);
+    for (const key of ATTRIBUTION_KEYS) {
+      expect(payload[key], key).toBe("");
+    }
+    expect(payload).toMatchObject({
+      inquiryType: "Consulting",
+      workEmail: "felipe.test+attribution@example.com",
+      source: "TEST-SAMPLE",
     });
   });
 
@@ -293,5 +421,13 @@ describe("golden fixtures", () => {
       expect(Object.keys(fixture)).toContain(key);
       expect(fixture[key]).toBe("");
     }
+  });
+});
+
+describe("attribution key lists", () => {
+  it("are the same keys in the same order on the widget and the Worker", () => {
+    // The widget may not import the Worker's list (see src/bundle.test.ts), so
+    // the contract is written twice. This is what keeps the copies in step.
+    expect([...ATTRIBUTION_FIELD_KEYS]).toEqual([...ATTRIBUTION_PAYLOAD_KEYS]);
   });
 });
